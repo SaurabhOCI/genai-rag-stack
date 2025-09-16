@@ -40,6 +40,28 @@ echo "[STEP] create /opt/genai and /home/opc/labs"
 mkdir -p /opt/genai /home/opc/labs /home/opc/bin
 chown -R opc:opc /opt/genai /home/opc/labs /home/opc/bin
 
+echo "[STEP] create /opt/code and fetch css-navigator/gen-ai"
+mkdir -p /opt/code
+
+# fetch only the gen-ai subfolder (idempotent; safe to re-run)
+TMP_DIR="$(mktemp -d)"
+retry 5 git clone --depth 1 --filter=blob:none --sparse https://github.com/ou-developers/css-navigator.git "$TMP_DIR"
+(
+  cd "$TMP_DIR"
+  retry 5 git sparse-checkout set gen-ai
+)
+
+# copy into /opt/code (rsync if available, else cp -a)
+if command -v rsync >/dev/null 2>&1 && [ -d "$TMP_DIR/gen-ai" ]; then
+  rsync -a "$TMP_DIR/gen-ai"/ /opt/code/
+elif [ -d "$TMP_DIR/gen-ai" ]; then
+  cp -a "$TMP_DIR/gen-ai"/. /opt/code/
+fi
+
+rm -rf "$TMP_DIR"
+chown -R opc:opc /opt/code || true
+chmod -R a+rX /opt/code || true
+
 echo "[STEP] embed user's init-genailabs.sh"
 cat >/opt/genai/init-genailabs.sh <<'USERSCRIPT'
 #!/bin/bash
