@@ -3,7 +3,7 @@
 # - Install Podman first (so DB unit can run)
 # - Start DB unit first, then setup unit (ordering fixed)
 # - Open FREEPDB1, SAVE STATE, wait for listener to publish FREEPDB1
-# - Create vector/vector with correct PL/SQL quoting
+# - Create vector/vector (idempotent, robust quoting)
 # - Install Python 3.9, create venv as opc, install jupyterlab + oracledb
 # - Hardcoded ORACLE_PWD=database123 (as requested)
 
@@ -94,23 +94,17 @@ for i in {1..60}; do
   sleep 3
 done
 
-# Create app user vector/vector idempotently (PL/SQL with standard quoting)
+# Create app user vector/vector idempotently (plain SQL; ignore 'already exists')
 log "creating PDB user 'vector' (idempotent)"
 "$PODMAN" exec -e ORACLE_PWD="$ORACLE_PWD" -i "$NAME" bash -lc '
   . /home/oracle/.bashrc
   sqlplus -S -L /nolog <<SQL
   CONNECT sys/${ORACLE_PWD}@127.0.0.1:1521/FREEPDB1 AS SYSDBA
-  DECLARE
-    v_count NUMBER;
-  BEGIN
-    SELECT COUNT(*) INTO v_count FROM dba_users WHERE username = ''VECTOR'';
-    IF v_count = 0 THEN
-      EXECUTE IMMEDIATE ''CREATE USER vector IDENTIFIED BY "vector"'';
-      EXECUTE IMMEDIATE ''GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector'';
-      EXECUTE IMMEDIATE ''ALTER USER vector QUOTA UNLIMITED ON USERS'';
-    END IF;
-  END;
-  /
+  SET DEFINE OFF
+  WHENEVER SQLERROR CONTINUE
+  CREATE USER vector IDENTIFIED BY "vector";
+  GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector;
+  ALTER USER vector QUOTA UNLIMITED ON USERS;
   EXIT
 SQL
 ' || log "WARN: vector user create step returned non-zero"
@@ -142,8 +136,12 @@ dnf -y install python39 python39-pip || true
 for p in 8888 8501 1521; do firewall-cmd --zone=public --add-port=${p}/tcp --permanent || true; done
 firewall-cmd --reload || true
 
+# Create shared dir as root, then hand off to opc
+mkdir -p /opt/genai
+chown opc:opc /opt/genai
+
 # Create venv as opc (avoid permission issues)
-sudo -u opc mkdir -p /home/opc/.venvs /home/opc/bin /opt/genai
+sudo -u opc mkdir -p /home/opc/.venvs /home/opc/bin
 sudo -u opc /usr/bin/python3.9 -m venv /home/opc/.venvs/genai || true
 sudo -u opc bash -lc 'source $HOME/.venvs/genai/bin/activate && python -m pip install --upgrade pip wheel && python -m pip install "jupyterlab>=4,<5" oracledb'
 
