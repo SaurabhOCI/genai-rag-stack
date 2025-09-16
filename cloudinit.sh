@@ -29,8 +29,8 @@ echo "[STEP] enable ol8_addons, pre-populate metadata, and install base pkgs"
 retry 5 dnf -y install dnf-plugins-core curl
 retry 5 dnf config-manager --set-enabled ol8_addons || true
 retry 5 dnf -y makecache --refresh
-retry 5 dnf -y install \\
-  git unzip jq tar make gcc gcc-c++ bzip2 bzip2-devel zlib-devel openssl-devel readline-devel libffi-devel \\
+retry 5 dnf -y install \
+  git unzip jq tar make gcc gcc-c++ bzip2 bzip2-devel zlib-devel openssl-devel readline-devel libffi-devel \
   wget curl which xz python3 python3-pip podman firewalld
 
 echo "[STEP] enable firewalld"
@@ -146,37 +146,26 @@ echo "Setting up permissions for the Oracle data directory..."
 sudo chown -R 54321:54321 /home/opc/oradata
 sudo chmod -R 755 /home/opc/oradata
 
-# Run the Oracle Database Free Edition container
-echo "Running Oracle Database container..."
-sudo podman run -d \
-    --name 23ai \
-    --network=host \
-    -e ORACLE_PWD=database123 \
-    -v /home/opc/oradata:/opt/oracle/oradata:z \
-    container-registry.oracle.com/database/free:latest
+# NOTE:
+# We no longer start the DB container here. The systemd unit genai-23ai.service owns it.
+# Just wait for the service to appear (published by the unit-managed container).
 
-# Wait for Oracle Container to start
-echo "Waiting for Oracle container to initialize..."
-sleep 10
-
-# Check if the listener is up and if the freepdb1 service is registered
-echo "Checking if service freepdb1 is registered with the listener..."
-while ! sudo podman exec 23ai bash -c "lsnrctl status | grep -q freepdb1"; do
-  echo "Waiting for freepdb1 service to be registered with the listener..."
-  sleep 30
+echo "Waiting for FREEPDB1 service to be registered with the listener..."
+until sudo podman exec 23ai bash -lc '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; do
+  echo "Still waiting for FREEPDB1..."
+  sleep 15
 done
-echo "freepdb1 service is registered with the listener."
+echo "FREEPDB1 service is registered."
 
-# Retry loop for Oracle login with error detection
+# Retry loop for Oracle login with error detection (now that service is up)
 MAX_RETRIES=5
 RETRY_COUNT=0
 DELAY=10
 
 while true; do
-  OUTPUT=$(sudo podman exec 23ai bash -c "sqlplus -S sys/database123@localhost:1521/freepdb1 as sysdba <<EOF
+  OUTPUT=$(sudo podman exec 23ai bash -lc ". /home/oracle/.bashrc; sqlplus -S -L sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba <<'EOF'
 EXIT;
 EOF")
-
   if [[ "$OUTPUT" == *"ORA-01017"* || "$OUTPUT" == *"ORA-01005"* ]]; then
     RETRY_COUNT=$((RETRY_COUNT + 1))
     echo "Attempt $RETRY_COUNT: Oracle credential error. Retrying in $DELAY seconds..."
@@ -187,45 +176,50 @@ EOF")
     echo "Oracle Database is available."
     break
   fi
-
   if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
     echo "Max retries reached. Unable to connect to Oracle Database."
     echo "Error output: $OUTPUT"
     exit 1
   fi
-
   sleep $DELAY
 done
 
-# Run the SQL commands to configure the PDB
-echo "Configuring Oracle database in PDB (freepdb1)..."
-sudo podman exec -i 23ai bash <<EOF
-sqlplus -S sys/database123@localhost:1521/freepdb1 as sysdba <<EOSQL
-CREATE BIGFILE TABLESPACE tbs2 DATAFILE 'bigtbs_f2.dbf' SIZE 1G AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL SEGMENT SPACE MANAGEMENT AUTO;
-CREATE UNDO TABLESPACE undots2 DATAFILE 'undotbs_2a.dbf' SIZE 1G AUTOEXTEND ON RETENTION GUARANTEE;
-CREATE TEMPORARY TABLESPACE temp_demo TEMPFILE 'temp02.dbf' SIZE 1G REUSE AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL UNIFORM SIZE 1M;
-CREATE USER vector IDENTIFIED BY vector DEFAULT TABLESPACE tbs2 QUOTA UNLIMITED ON tbs2;
-GRANT DB_DEVELOPER_ROLE TO vector;
+# Run the SQL commands to configure the PDB (kept as in your original intent)
+echo "Configuring Oracle database in PDB (FREEPDB1)..."
+sudo podman exec -i 23ai bash -lc '. /home/oracle/.bashrc; sqlplus -S -L sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba <<EOSQL
+CREATE BIGFILE TABLESPACE tbs2 DATAFILE ''bigtbs_f2.dbf'' SIZE 1G AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL SEGMENT SPACE MANAGEMENT AUTO;
+CREATE UNDO TABLESPACE undots2 DATAFILE ''undotbs_2a.dbf'' SIZE 1G AUTOEXTEND ON RETENTION GUARANTEE;
+CREATE TEMPORARY TABLESPACE temp_demo TEMPFILE ''temp02.dbf'' SIZE 1G REUSE AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL UNIFORM SIZE 1M;
+MERGE INTO dba_users u USING (SELECT ''VECTOR'' username FROM dual) s ON (u.username = s.username)
+WHEN NOT MATCHED THEN INSERT (username) VALUES (''VECTOR'');
+DECLARE v_cnt number; BEGIN
+  SELECT COUNT(*) INTO v_cnt FROM dba_users WHERE username = ''VECTOR'';
+  IF v_cnt = 0 THEN
+    EXECUTE IMMEDIATE ''CREATE USER vector IDENTIFIED BY vector DEFAULT TABLESPACE tbs2 QUOTA UNLIMITED ON tbs2'';
+    EXECUTE IMMEDIATE ''GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector'';
+  ELSE
+    EXECUTE IMMEDIATE ''ALTER USER vector IDENTIFIED BY vector'';
+    EXECUTE IMMEDIATE ''ALTER USER vector DEFAULT TABLESPACE tbs2 QUOTA UNLIMITED ON tbs2'';
+    EXECUTE IMMEDIATE ''GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector'';
+  END IF;
+END;
+/
 EXIT;
-EOSQL
-EOF
+EOSQL'
 
-# Reconnect to CDB root to apply system-level changes
+# Optional CDB-level tweaks (kept, but guarded)
 echo "Switching to CDB root for system-level changes..."
-sudo podman exec -i 23ai bash <<EOF
-sqlplus -S / as sysdba <<EOSQL
+sudo podman exec -i 23ai bash -lc '. /home/oracle/.bashrc; sqlplus -S -L / as sysdba <<EOSQL
+WHENEVER SQLERROR CONTINUE
 CREATE PFILE FROM SPFILE;
 ALTER SYSTEM SET vector_memory_size = 512M SCOPE=SPFILE;
 SHUTDOWN IMMEDIATE;
 STARTUP;
 EXIT;
-EOSQL
-EOF
+EOSQL'
 
 # Wait for Oracle to restart and apply memory changes
 sleep 10
-
-echo "Skipping vector_memory_size check. Assuming it is set to 512M based on startup logs."
 
 # Now switch to opc for user-specific tasks
 sudo -u opc -i bash <<'EOF_OPC'
@@ -258,23 +252,13 @@ source $HOME/.bashrc
 export PATH="$PYENV_ROOT/bin:$PATH"
 
 # Install Python 3.11.9 using pyenv with the correct SQLite version linked
-CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib" LD_LIBRARY_PATH="/usr/local/lib" pyenv install 3.11.9
-
-# Rehash pyenv to update shims
+CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib" LD_LIBRARY_PATH="/usr/local/lib" pyenv install 3.11.9 || true
 pyenv rehash
-
-# Set up vectors directory and Python 3.11.9 environment
 mkdir -p $HOME/labs
 cd $HOME/labs
 pyenv local 3.11.9
-
-# Rehash again to ensure shims are up to date
 pyenv rehash
-
-# Verify Python version in the labs directory
 python --version
-
-# Adding the PYTHONPATH for correct installation and look up for the libraries
 export PYTHONPATH=$HOME/.pyenv/versions/3.11.9/lib/python3.11/site-packages:$PYTHONPATH
 
 # Install required Python packages
@@ -303,25 +287,14 @@ source $HOME/.bashrc
 # Copy files from the git repo labs folder to the labs directory in the instance
 echo "Copying files from the 'labs' folder in the OU Git repository to the existing labs directory..."
 REPO_URL="https://github.com/ou-developers/ou-generativeai-pro.git"
-FINAL_DIR="$HOME/labs"  # Existing directory on your instance
+FINAL_DIR="$HOME/labs"
 
-# Initialize a new git repository
 git init
-
-# Add the remote repository
 git remote add origin $REPO_URL
-
-# Enable sparse-checkout and specify the folder to download
 git config core.sparseCheckout true
 echo "labs/*" >> .git/info/sparse-checkout
-
-# Pull only the specified folder into the existing directory
-git pull origin main  # Replace 'main' with the correct branch name if necessary
-
-# Move the contents of the 'labs' subfolder to the root of FINAL_DIR, if necessary
-mv labs/* . 2>/dev/null || true  # Move files if 'labs' folder exists
-
-# Remove any remaining empty 'labs' directory and .git folder
+git pull origin main || true
+mv labs/* . 2>/dev/null || true
 rm -rf .git labs
 
 echo "Files successfully downloaded to $FINAL_DIR"
@@ -404,14 +377,81 @@ chmod +x /usr/local/bin/genai-setup.sh
 # ---- genai-db.sh (DB container) ----
 cat >/usr/local/bin/genai-db.sh <<'DBSCR'
 #!/bin/bash
-set -uxo pipefail
-echo "[DB] starting podman tasks $(date -u)"
-retry() { local max=${1:-5}; shift; local n=1; until "$@"; do rc=$?; [[ $n -ge $max ]] && echo "[RETRY] failed after $n: $*" && return $rc; echo "[RETRY] $n -> retrying in $((n*5))s: $*"; sleep $((n*5)); n=$((n+1)); done; return 0; }
-retry 5 podman pull container-registry.oracle.com/database/free:latest || true
-podman rm -f 23ai || true
-mkdir -p /home/opc/oradata && chown -R 54321:54321 /home/opc/oradata
-podman run -d --name 23ai --network=host -e ORACLE_PWD=database123 -v /home/opc/oradata:/opt/oracle/oradata:z container-registry.oracle.com/database/free:latest || true
-echo "[DB] done $(date -u)"
+set -Eeuo pipefail
+
+log(){ echo "[DB] $*"; }
+retry() { local tries=${1:-5}; shift; local n=1; until "$@"; do local rc=$?;
+  if (( n>=tries )); then return "$rc"; fi
+  log "retry $n/$tries (rc=$rc): $*"; sleep $((n*5)); ((n++));
+done; }
+
+ORACLE_PWD="database123"
+ORACLE_PDB="FREEPDB1"
+ORADATA_DIR="/home/opc/oradata"
+IMAGE="container-registry.oracle.com/database/free:latest"
+NAME="23ai"
+
+log "start $(date -u)"
+mkdir -p "$ORADATA_DIR" && chown -R 54321:54321 "$ORADATA_DIR" || true
+retry 5 podman pull "$IMAGE" || true
+podman rm -f "$NAME" || true
+
+# Start DB
+retry 5 podman run -d --name "$NAME" --network=host \
+  -e ORACLE_PWD="$ORACLE_PWD" \
+  -e ORACLE_PDB="$ORACLE_PDB" \
+  -e ORACLE_MEMORY='2048' \
+  -v "$ORADATA_DIR":/opt/oracle/oradata:z \
+  "$IMAGE"
+
+# Wait until the image signals ready (first boot can be slow)
+log "waiting for 'DATABASE IS READY TO USE!'"
+for i in {1..144}; do
+  podman logs "$NAME" 2>&1 | grep -q 'DATABASE IS READY TO USE!' && break
+  sleep 5
+done
+
+# Open PDB + SAVE STATE via TCP to CDB service "FREE"
+log "opening PDB and saving state..."
+podman exec -e ORACLE_PWD="$ORACLE_PWD" -i "$NAME" bash -lc '
+  . /home/oracle/.bashrc
+  sqlplus -S -L /nolog <<SQL
+  CONNECT sys/${ORACLE_PWD}@127.0.0.1:1521/FREE AS SYSDBA
+  WHENEVER SQLERROR EXIT SQL.SQLCODE
+  ALTER PLUGGABLE DATABASE FREEPDB1 OPEN;
+  ALTER PLUGGABLE DATABASE FREEPDB1 SAVE STATE;
+  ALTER SYSTEM REGISTER;
+  EXIT
+SQL
+' || log "WARN: open/save state returned non-zero (may already be open)"
+
+# Wait until the listener publishes FREEPDB1
+log "waiting for listener to publish FREEPDB1..."
+for i in {1..60}; do
+  podman exec -i "$NAME" bash -lc '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"' && { log "FREEPDB1 registered"; break; }
+  sleep 3
+done
+
+# (Optional) Create vector/vector user idempotently
+log "creating PDB user 'vector' (idempotent)"
+podman exec -e ORACLE_PWD="$ORACLE_PWD" -i "$NAME" bash -lc '
+  . /home/oracle/.bashrc
+  sqlplus -S -L /nolog <<SQL
+  CONNECT sys/${ORACLE_PWD}@127.0.0.1:1521/FREEPDB1 AS SYSDBA
+  DECLARE v_count number; BEGIN
+    SELECT COUNT(*) INTO v_count FROM dba_users WHERE username = ''VECTOR'';
+    IF v_count = 0 THEN
+      EXECUTE IMMEDIATE q''[CREATE USER vector IDENTIFIED BY vector]'';
+      EXECUTE IMMEDIATE q''[GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector]'';
+      EXECUTE IMMEDIATE q''[ALTER USER vector QUOTA UNLIMITED ON USERS]'';
+    END IF;
+  END;
+  /
+  EXIT
+SQL
+' || log "WARN: vector user create step returned non-zero"
+
+log "done $(date -u)"
 DBSCR
 chmod +x /usr/local/bin/genai-db.sh
 
@@ -441,6 +481,8 @@ After=network-online.target genai-setup.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+TimeoutStartSec=0
+KillMode=process
 ExecStart=/bin/bash -lc '/usr/local/bin/genai-db.sh >> /var/log/genai_setup.log 2>&1'
 Restart=no
 
