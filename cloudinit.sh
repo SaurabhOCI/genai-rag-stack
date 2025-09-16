@@ -43,6 +43,11 @@ chown -R opc:opc /opt/genai /home/opc/labs /home/opc/bin
 echo "[STEP] create /opt/code and fetch css-navigator/gen-ai"
 mkdir -p /opt/code
 
+# preflight: ensure tools exist
+if ! command -v git >/dev/null 2>&1;   then retry 5 dnf -y install git;   fi
+if ! command -v curl >/dev/null 2>&1;  then retry 5 dnf -y install curl;  fi
+if ! command -v unzip >/dev/null 2>&1; then retry 5 dnf -y install unzip; fi
+
 TMP_DIR="$(mktemp -d)"
 REPO_ZIP="/tmp/cssnav.zip"
 
@@ -65,7 +70,6 @@ else
   retry 5 curl -L -o "$REPO_ZIP" https://codeload.github.com/ou-developers/css-navigator/zip/refs/heads/main
   TMP_ZIP_DIR="$(mktemp -d)"
   unzip -q -o "$REPO_ZIP" -d "$TMP_ZIP_DIR"
-  # path is css-navigator-main/gen-ai in the archive
   if [ -d "$TMP_ZIP_DIR/css-navigator-main/gen-ai" ]; then
     if command -v rsync >/dev/null 2>&1; then
       rsync -a "$TMP_ZIP_DIR/css-navigator-main/gen-ai"/ /opt/code/
