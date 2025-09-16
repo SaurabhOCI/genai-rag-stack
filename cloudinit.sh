@@ -36,32 +36,32 @@ retry 5 dnf -y install \\
 echo "[STEP] enable firewalld"
 systemctl enable --now firewalld || true
 
-echo "[STEP] create /opt/genai and /home/opc/labs"
-mkdir -p /opt/genai /home/opc/labs /home/opc/bin
-chown -R opc:opc /opt/genai /home/opc/labs /home/opc/bin
+echo "[STEP] create /opt/genai and /home/opc/code"
+mkdir -p /opt/genai /home/opc/code /home/opc/bin
+chown -R opc:opc /opt/genai /home/opc/code /home/opc/bin
 
-echo "[STEP] create /opt/code and fetch css-navigator/gen-ai"
-mkdir -p /opt/code
+echo "[STEP] create /home/opc/code and fetch css-navigator/gen-ai"
+CODE_DIR="/home/opc/code"
+mkdir -p "$CODE_DIR"
 
 # preflight: ensure tools exist
-if ! command -v git >/dev/null 2>&1;   then retry 5 dnf -y install git;   fi
-if ! command -v curl >/dev/null 2>&1;  then retry 5 dnf -y install curl;  fi
+if ! command -v git   >/dev/null 2>&1; then retry 5 dnf -y install git;   fi
+if ! command -v curl  >/dev/null 2>&1; then retry 5 dnf -y install curl;  fi
 if ! command -v unzip >/dev/null 2>&1; then retry 5 dnf -y install unzip; fi
 
 TMP_DIR="$(mktemp -d)"
 REPO_ZIP="/tmp/cssnav.zip"
 
-# If we got content via sparse-checkout, copy it
+# Try sparse checkout (robust)
+retry 5 git clone --depth 1 --filter=blob:none --sparse https://github.com/ou-developers/css-navigator.git "$TMP_DIR" || true
+retry 5 git -C "$TMP_DIR" sparse-checkout init --cone || true
+retry 5 git -C "$TMP_DIR" sparse-checkout set gen-ai || true
+
+# If sparse-checkout got files, copy them
 if [ -d "$TMP_DIR/gen-ai" ] && [ -n "$(ls -A "$TMP_DIR/gen-ai" 2>/dev/null)" ]; then
   echo "[STEP] copying from sparse-checkout"
-  # make sure source is traversable (some tmp contexts are restrictive)
   chmod -R a+rx "$TMP_DIR/gen-ai" || true
-  # try rsync, but fall back to cp if rsync hits permission/selinux issues
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a "$TMP_DIR/gen-ai"/ /opt/code/ || cp -a "$TMP_DIR/gen-ai"/. /opt/code/
-  else
-    cp -a "$TMP_DIR/gen-ai"/. /opt/code/
-  fi
+  cp -a "$TMP_DIR/gen-ai"/. "$CODE_DIR"/
 else
   # Fallback: download repo zip and extract only gen-ai
   echo "[STEP] sparse-checkout empty; falling back to zip"
@@ -70,7 +70,7 @@ else
   unzip -q -o "$REPO_ZIP" -d "$TMP_ZIP_DIR"
   if [ -d "$TMP_ZIP_DIR/css-navigator-main/gen-ai" ]; then
     chmod -R a+rx "$TMP_ZIP_DIR/css-navigator-main/gen-ai" || true
-    cp -a "$TMP_ZIP_DIR/css-navigator-main/gen-ai"/. /opt/code/
+    cp -a "$TMP_ZIP_DIR/css-navigator-main/gen-ai"/. "$CODE_DIR"/
   else
     echo "[WARN] gen-ai folder not found in zip"
   fi
@@ -78,8 +78,11 @@ else
 fi
 
 rm -rf "$TMP_DIR"
-chown -R opc:opc /opt/code || true
-chmod -R a+rX /opt/code || true
+
+# ownership and a backward-compat symlink
+chown -R opc:opc "$CODE_DIR" || true
+chmod -R a+rX "$CODE_DIR" || true
+ln -sfn "$CODE_DIR" /opt/code || true
 
 echo "[STEP] embed user's init-genailabs.sh"
 cat >/opt/genai/init-genailabs.sh <<'USERSCRIPT'
