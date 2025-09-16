@@ -45,7 +45,7 @@ if [[ -f "$MARKER" ]]; then
   exit 0
 fi
 
-retry() { local max=${1:-5}; shift; local n=1; until "$@"; do rc=$?; [[ $n -ge $max ]] && echo "[RETRY] failed after $n: $*" && return $rc; echo "[RETRY] $n -> retrying in $((n*5))s: $*"; sleep $((n*5)); n=$((n+1)); done; return 0; }
+retry() { local max=${1:-5}; shift; local n=1; until "$@"; do rc=$?; [[ $n -ge $max ]] && echo "[RETRY] failed after $n: $*" && return $rc; echo "[RETRY] $n -> retrying $((n*5))s: $*"; sleep $((n*5)); n=$((n+1)); done; return 0; }
 
 echo "[STEP] enable ol8_addons, pre-populate metadata, and install base pkgs"
 retry 5 dnf -y install dnf-plugins-core curl
@@ -231,7 +231,7 @@ pyenv rehash
 python --version
 export PYTHONPATH=$HOME/.pyenv/versions/3.11.9/lib/python3.11/site-packages:$PYTHONPATH
 
-$HOME/.pyenv/versions/3.11.9/bin/pip install --no-cache-dir oci==2.129.1 oracledb sentence-transformers langchain==0.2.6 langchain-community==0.2.6 langchain-chroma==0.1.2 langchain-core==0.2.11 langchain-text-splitters==0.2.2 langsmith==0.1.83 pypdf==4.2.0 streamlit==1.36.0 python-multipart==0.0.9 chroma-hnswlib==0.7.3 chromadb==0.5.3 torch==2.5.0
+$HOME/.pyenv/versions/3.11.9/bin/pip install --no-cache-dir oci==2.129.1 oracledb sentence-transformers langchain==0.2.6 langchain-community==0.2.6 langchain-core==0.2.11 langchain-text-splitters==0.2.2 langsmith==0.1.83 pypdf==4.2.0 streamlit==1.36.0 python-multipart==0.0.9 chroma-hnswlib==0.7.3 chromadb==0.5.3 torch==2.5.0
 
 python - <<PY
 from sentence_transformers import SentenceTransformer
@@ -270,181 +270,4 @@ retry 5 dnf -y module enable python39 || true
 retry 5 dnf -y install python39 python39-pip
 sudo -u opc bash -lc 'python3.9 -m venv $HOME/.venvs/genai || true; echo "source $HOME/.venvs/genai/bin/activate" >> $HOME/.bashrc; source $HOME/.venvs/genai/bin/activate; python -m pip install --upgrade pip wheel setuptools'
 echo "[STEP] install Python libraries"
-sudo -u opc bash -lc 'source $HOME/.venvs/genai/bin/activate; pip install --no-cache-dir jupyterlab==4.2.5 streamlit==1.36.0 oracledb sentence-transformers langchain==0.2.6 langchain-community==0.2.6 langchain-core==0.2.11 langchain-text-splitters==0.2.2 langsmith==0.1.83 pypdf==4.2.0 python-multipart==0.0.9 chroma-hnswlib==0.7.3 chromadb==0.5.3 torch==2.5.0 oci oracle-ads'
-
-echo "[STEP] install OCI CLI to ~/bin/oci and make PATH global"
-sudo -u opc bash -lc 'retry 5 curl -sSL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh -o /tmp/oci-install.sh; retry 5 bash /tmp/oci-install.sh --accept-all-defaults --exec-dir $HOME/bin --install-dir $HOME/lib/oci-cli --update-path false; grep -q "export PATH=$HOME/bin" $HOME/.bashrc || echo "export PATH=$HOME/bin:$PATH" >> $HOME/.bashrc'
-cat >/etc/profile.d/genai-path.sh <<'PROF'
-export PATH=/home/opc/bin:$PATH
-PROF
-
-echo "[STEP] seed /opt/genai content"
-cat >/opt/genai/LoadProperties.py <<'PY'
-class LoadProperties:
-    def __init__(self):
-        import json
-        with open('config.txt') as f:
-            js = json.load(f)
-        self.model_name = js.get("model_name")
-        self.embedding_model_name = js.get("embedding_model_name")
-        self.endpoint = js.get("endpoint")
-        self.compartment_ocid = js.get("compartment_ocid")
-    def getModelName(self): return self.model_name
-    def getEmbeddingModelName(self): return self.embedding_model_name
-    def getEndpoint(self): return self.endpoint
-    def getCompartment(self): return self.compartment_ocid
-PY
-cat >/opt/genai/config.txt <<'CFG'
-{"model_name":"cohere.command-r-16k","embedding_model_name":"cohere.embed-english-v3.0","endpoint":"https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com","compartment_ocid":"ocid1.compartment.oc1....replace_me..."}
-CFG
-mkdir -p /opt/genai/txt-docs /opt/genai/pdf-docs
-echo "faq | What are Always Free services?=====Always Free services are part of Oracle Cloud Free Tier." >/opt/genai/txt-docs/faq.txt
-chown -R opc:opc /opt/genai
-
-echo "[STEP] write start_jupyter.sh"
-cat >/home/opc/start_jupyter.sh <<'SH'
-#!/bin/bash
-set -eux
-source $HOME/.venvs/genai/bin/activate
-jupyter lab --NotebookApp.token='' --NotebookApp.password='' --ip=0.0.0.0 --port=8888 --no-browser
-SH
-chown opc:opc /home/opc/start_jupyter.sh
-chmod +x /home/opc/start_jupyter.sh
-
-echo "[STEP] open firewall ports"
-for p in 8888 8501 1521; do firewall-cmd --zone=public --add-port=${p}/tcp --permanent || true; done
-firewall-cmd --reload || true
-
-echo "[STEP] run user's init-genailabs.sh (non-fatal)"
-set +e
-bash /opt/genai/init-genailabs.sh
-USR_RC=$?
-set -e
-echo "[STEP] user init script exit code: $USR_RC"
-
-touch "$MARKER"
-echo "===== GenAI OneClick systemd: COMPLETE $(date -u) ====="
-SCRIPT
-chmod +x /usr/local/bin/genai-setup.sh
-
-# ====================================================================
-# genai-db.sh (DB container) — robust bootstrap for 23ai
-# ====================================================================
-cat >/usr/local/bin/genai-db.sh <<'DBSCR'
-#!/bin/bash
-set -Eeuo pipefail
-
-PODMAN="/usr/bin/podman"
-log(){ echo "[DB] $*"; }
-retry() { local t=${1:-5}; shift; local n=1; until "$@"; do local rc=$?;
-  if (( n>=t )); then return "$rc"; fi
-  log "retry $n/$t (rc=$rc): $*"; sleep $((n*5)); ((n++));
-done; }
-
-ORACLE_PWD="database123"
-ORACLE_PDB="FREEPDB1"
-ORADATA_DIR="/home/opc/oradata"
-IMAGE="container-registry.oracle.com/database/free:latest"
-NAME="23ai"
-
-log "start $(date -u)"
-mkdir -p "$ORADATA_DIR" && chown -R 54321:54321 "$ORADATA_DIR" || true
-
-retry 5 "$PODMAN" pull "$IMAGE" || true
-"$PODMAN" rm -f "$NAME" || true
-
-retry 5 "$PODMAN" run -d --name "$NAME" --network=host \
-  -e ORACLE_PWD="$ORACLE_PWD" \
-  -e ORACLE_PDB="$ORACLE_PDB" \
-  -e ORACLE_MEMORY='2048' \
-  -v "$ORADATA_DIR":/opt/oracle/oradata:z \
-  "$IMAGE"
-
-log "waiting for 'DATABASE IS READY TO USE!'"
-for i in {1..144}; do
-  "$PODMAN" logs "$NAME" 2>&1 | grep -q 'DATABASE IS READY TO USE!' && break
-  sleep 5
-done
-
-log "opening PDB and saving state..."
-"$PODMAN" exec -e ORACLE_PWD="$ORACLE_PWD" -i "$NAME" bash -lc '
-  . /home/oracle/.bashrc
-  sqlplus -S -L /nolog <<SQL
-  CONNECT sys/${ORACLE_PWD}@127.0.0.1:1521/FREE AS SYSDBA
-  WHENEVER SQLERROR EXIT SQL.SQLCODE
-  ALTER PLUGGABLE DATABASE FREEPDB1 OPEN;
-  ALTER PLUGGABLE DATABASE FREEPDB1 SAVE STATE;
-  ALTER SYSTEM REGISTER;
-  EXIT
-SQL
-' || log "WARN: open/save state returned non-zero (may already be open)"
-
-log "waiting for listener to publish FREEPDB1..."
-for i in {1..60}; do
-  "$PODMAN" exec -i "$NAME" bash -lc '. /home/oracle/.bashrc; lsnrctl status' \
-    | grep -qi 'Service "FREEPDB1"' && { log "FREEPDB1 registered"; break; }
-  sleep 3
-done
-
-log "creating PDB user 'vector' (idempotent)"
-"$PODMAN" exec -e ORACLE_PWD="$ORACLE_PWD" -i "$NAME" bash -lc '
-  . /home/oracle/.bashrc
-  sqlplus -S -L /nolog <<SQL
-  CONNECT sys/${ORACLE_PWD}@127.0.0.1:1521/FREEPDB1 AS SYSDBA
-  SET DEFINE OFF
-  WHENEVER SQLERROR CONTINUE
-  CREATE USER vector IDENTIFIED BY "vector";
-  GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector;
-  ALTER USER vector QUOTA UNLIMITED ON USERS;
-  EXIT
-SQL
-' || log "WARN: vector user create step returned non-zero"
-
-log "done $(date -u)"
-DBSCR
-chmod +x /usr/local/bin/genai-db.sh
-
-# ====================================================================
-# systemd units — DB FIRST, then setup
-# ====================================================================
-cat >/etc/systemd/system/genai-23ai.service <<'UNIT_DB'
-[Unit]
-Description=GenAI oneclick - Oracle 23ai container
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-TimeoutStartSec=0
-KillMode=process
-ExecStart=/bin/bash -lc '/usr/local/bin/genai-db.sh >> /var/log/genai_setup.log 2>&1'
-Restart=no
-
-[Install]
-WantedBy=multi-user.target
-UNIT_DB
-
-cat >/etc/systemd/system/genai-setup.service <<'UNIT_SETUP'
-[Unit]
-Description=GenAI oneclick post-boot setup
-Wants=network-online.target genai-23ai.service
-After=network-online.target genai-23ai.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -lc '/usr/local/bin/genai-setup.sh >> /var/log/genai_setup.log 2>&1'
-Restart=no
-
-[Install]
-WantedBy=multi-user.target
-UNIT_SETUP
-
-systemctl daemon-reload
-systemctl enable genai-23ai.service
-systemctl enable genai-setup.service
-systemctl start genai-23ai.service      # DB/bootstrap first
-systemctl start genai-setup.service     # then app/setup
-
-echo "===== GenAI OneClick: cloud-init done $(date -u) ====="
+sudo -u opc bash -lc 'source $HOME/.venvs/genai/bin/activate; pip install --no-cache-dir jupyterlab==4.2.5 streamlit==1.36.0 oracledb sentence-transformers langchain==0.2.6 langchain-community==0.2.6 langchain-core==0.2.11 langchain-text-splitters==0.2.2 langsmith==0.1.83 pypdf==4.2.0 python-multipart==0.0.9 chroma-hnswlib==0.7.3 chromadb==0.5.3 torch==2.5.0
