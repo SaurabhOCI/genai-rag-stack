@@ -51,16 +51,14 @@ if ! command -v unzip >/dev/null 2>&1; then retry 5 dnf -y install unzip; fi
 TMP_DIR="$(mktemp -d)"
 REPO_ZIP="/tmp/cssnav.zip"
 
-# Try sparse checkout (robust mode)
-retry 5 git clone --depth 1 --filter=blob:none --sparse https://github.com/ou-developers/css-navigator.git "$TMP_DIR"
-retry 5 git -C "$TMP_DIR" sparse-checkout init --cone
-retry 5 git -C "$TMP_DIR" sparse-checkout set gen-ai || true
-
 # If we got content via sparse-checkout, copy it
 if [ -d "$TMP_DIR/gen-ai" ] && [ -n "$(ls -A "$TMP_DIR/gen-ai" 2>/dev/null)" ]; then
   echo "[STEP] copying from sparse-checkout"
+  # make sure source is traversable (some tmp contexts are restrictive)
+  chmod -R a+rx "$TMP_DIR/gen-ai" || true
+  # try rsync, but fall back to cp if rsync hits permission/selinux issues
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a "$TMP_DIR/gen-ai"/ /opt/code/
+    rsync -a "$TMP_DIR/gen-ai"/ /opt/code/ || cp -a "$TMP_DIR/gen-ai"/. /opt/code/
   else
     cp -a "$TMP_DIR/gen-ai"/. /opt/code/
   fi
@@ -71,11 +69,8 @@ else
   TMP_ZIP_DIR="$(mktemp -d)"
   unzip -q -o "$REPO_ZIP" -d "$TMP_ZIP_DIR"
   if [ -d "$TMP_ZIP_DIR/css-navigator-main/gen-ai" ]; then
-    if command -v rsync >/dev/null 2>&1; then
-      rsync -a "$TMP_ZIP_DIR/css-navigator-main/gen-ai"/ /opt/code/
-    else
-      cp -a "$TMP_ZIP_DIR/css-navigator-main/gen-ai"/. /opt/code/
-    fi
+    chmod -R a+rx "$TMP_ZIP_DIR/css-navigator-main/gen-ai" || true
+    cp -a "$TMP_ZIP_DIR/css-navigator-main/gen-ai"/. /opt/code/
   else
     echo "[WARN] gen-ai folder not found in zip"
   fi
