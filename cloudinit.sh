@@ -43,19 +43,39 @@ chown -R opc:opc /opt/genai /home/opc/labs /home/opc/bin
 echo "[STEP] create /opt/code and fetch css-navigator/gen-ai"
 mkdir -p /opt/code
 
-# fetch only the gen-ai subfolder (idempotent; safe to re-run)
 TMP_DIR="$(mktemp -d)"
-retry 5 git clone --depth 1 --filter=blob:none --sparse https://github.com/ou-developers/css-navigator.git "$TMP_DIR"
-(
-  cd "$TMP_DIR"
-  retry 5 git sparse-checkout set gen-ai
-)
+REPO_ZIP="/tmp/cssnav.zip"
 
-# copy into /opt/code (rsync if available, else cp -a)
-if command -v rsync >/dev/null 2>&1 && [ -d "$TMP_DIR/gen-ai" ]; then
-  rsync -a "$TMP_DIR/gen-ai"/ /opt/code/
-elif [ -d "$TMP_DIR/gen-ai" ]; then
-  cp -a "$TMP_DIR/gen-ai"/. /opt/code/
+# Try sparse checkout (robust mode)
+retry 5 git clone --depth 1 --filter=blob:none --sparse https://github.com/ou-developers/css-navigator.git "$TMP_DIR"
+retry 5 git -C "$TMP_DIR" sparse-checkout init --cone
+retry 5 git -C "$TMP_DIR" sparse-checkout set gen-ai || true
+
+# If we got content via sparse-checkout, copy it
+if [ -d "$TMP_DIR/gen-ai" ] && [ -n "$(ls -A "$TMP_DIR/gen-ai" 2>/dev/null)" ]; then
+  echo "[STEP] copying from sparse-checkout"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a "$TMP_DIR/gen-ai"/ /opt/code/
+  else
+    cp -a "$TMP_DIR/gen-ai"/. /opt/code/
+  fi
+else
+  # Fallback: download repo zip and extract only gen-ai
+  echo "[STEP] sparse-checkout empty; falling back to zip"
+  retry 5 curl -L -o "$REPO_ZIP" https://codeload.github.com/ou-developers/css-navigator/zip/refs/heads/main
+  TMP_ZIP_DIR="$(mktemp -d)"
+  unzip -q -o "$REPO_ZIP" -d "$TMP_ZIP_DIR"
+  # path is css-navigator-main/gen-ai in the archive
+  if [ -d "$TMP_ZIP_DIR/css-navigator-main/gen-ai" ]; then
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a "$TMP_ZIP_DIR/css-navigator-main/gen-ai"/ /opt/code/
+    else
+      cp -a "$TMP_ZIP_DIR/css-navigator-main/gen-ai"/. /opt/code/
+    fi
+  else
+    echo "[WARN] gen-ai folder not found in zip"
+  fi
+  rm -rf "$TMP_ZIP_DIR" "$REPO_ZIP"
 fi
 
 rm -rf "$TMP_DIR"
