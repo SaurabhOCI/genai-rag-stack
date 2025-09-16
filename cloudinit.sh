@@ -411,19 +411,6 @@ retry 5 podman pull container-registry.oracle.com/database/free:latest || true
 podman rm -f 23ai || true
 mkdir -p /home/opc/oradata && chown -R 54321:54321 /home/opc/oradata
 podman run -d --name 23ai --network=host -e ORACLE_PWD=database123 -v /home/opc/oradata:/opt/oracle/oradata:z container-registry.oracle.com/database/free:latest || true
-# Ensure FREEPDB1 is open and registered with listener
-# 1) wait for listener to come up and register service
-retry 30 bash -lc 'podman exec 23ai bash -lc "lsnrctl status | grep -qi FREEPDB1"'
-# 2) explicitly open FREEPDB1 and save state (safe if already open)
-podman exec -i 23ai bash <<'EOF_DB'
-sqlplus -S / as sysdba <<'SQL'
-ALTER PLUGGABLE DATABASE FREEPDB1 OPEN;
-ALTER PLUGGABLE DATABASE FREEPDB1 SAVE STATE;
-EXIT;
-SQL
-EOF_DB
-# 3) re-check registration
-retry 20 bash -lc 'podman exec 23ai bash -lc "lsnrctl status | grep -qi FREEPDB1"'
 echo "[DB] done $(date -u)"
 DBSCR
 chmod +x /usr/local/bin/genai-db.sh
