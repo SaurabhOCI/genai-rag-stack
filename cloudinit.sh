@@ -1,6 +1,11 @@
 #!/bin/bash
 # cloudinit.sh — Oracle 23ai Free + GenAI stack bootstrap
-# Fix: install Podman first, then start DB unit; DB script uses absolute podman path.
+# - Install Podman first (so DB unit can run)
+# - Start DB unit first, then setup unit (ordering fixed)
+# - Open FREEPDB1, SAVE STATE, wait for listener to publish FREEPDB1
+# - Create vector/vector with correct PL/SQL quoting
+# - Install Python 3.9, create venv as opc, install jupyterlab + oracledb
+# - Hardcoded ORACLE_PWD=database123 (as requested)
 
 set -Eeuo pipefail
 
@@ -16,23 +21,17 @@ if command -v /usr/libexec/oci-growfs >/dev/null 2>&1; then
 fi
 
 # --------------------------------------------------------------------
-# MINIMAL PRE-INSTALL (so DB unit can run): Podman + basics
+# PRE: install Podman so the DB unit can run right away
 # --------------------------------------------------------------------
-echo "[PRE] installing Podman and basics so DB unit can run"
+echo "[PRE] installing Podman and basics"
 dnf -y install dnf-plugins-core || true
 dnf config-manager --set-enabled ol8_addons || true
 dnf -y makecache --refresh || true
 dnf -y install podman curl grep coreutils shadow-utils || true
-# sanity
 /usr/bin/podman --version || { echo "[PRE] podman missing"; exit 1; }
 
 # --------------------------------------------------------------------
-# DB bootstrap script: /usr/local/bin/genai-db.sh
-#   - starts container
-#   - waits for first boot
-#   - opens FREEPDB1 + SAVE STATE
-#   - waits for FREEPDB1 in listener
-#   - (optional) creates vector/vector
+# /usr/local/bin/genai-db.sh  (DB bootstrap)
 # --------------------------------------------------------------------
 cat >/usr/local/bin/genai-db.sh <<'DBSCR'
 #!/bin/bash
@@ -45,7 +44,7 @@ retry() { local t=${1:-5}; shift; local n=1; until "$@"; do local rc=$?;
   log "retry $n/$t (rc=$rc): $*"; sleep $((n*5)); ((n++));
 done; }
 
-# Keep ONE password here (as requested)
+# ONE password (hardcoded by request)
 ORACLE_PWD="database123"
 ORACLE_PDB="FREEPDB1"
 ORADATA_DIR="/home/opc/oradata"
@@ -53,15 +52,12 @@ IMAGE="container-registry.oracle.com/database/free:latest"
 NAME="23ai"
 
 log "start $(date -u)"
-
-# Data dir & perms for oracle uid 54321
 mkdir -p "$ORADATA_DIR" && chown -R 54321:54321 "$ORADATA_DIR" || true
 
-# Pull (best-effort) and remove stale container
 retry 5 "$PODMAN" pull "$IMAGE" || true
 "$PODMAN" rm -f "$NAME" || true
 
-# Launch DB (host networking so 127.0.0.1:1521 works)
+# Launch DB container (host networking)
 retry 5 "$PODMAN" run -d --name "$NAME" --network=host \
   -e ORACLE_PWD="$ORACLE_PWD" \
   -e ORACLE_PDB="$ORACLE_PDB" \
@@ -69,14 +65,14 @@ retry 5 "$PODMAN" run -d --name "$NAME" --network=host \
   -v "$ORADATA_DIR":/opt/oracle/oradata:z \
   "$IMAGE"
 
-# Wait for first-boot marker
+# Wait for first-boot completion banner (can take several minutes)
 log "waiting for 'DATABASE IS READY TO USE!'"
 for i in {1..144}; do
   "$PODMAN" logs "$NAME" 2>&1 | grep -q 'DATABASE IS READY TO USE!' && break
   sleep 5
 done
 
-# Open FREEPDB1 & SAVE STATE using TCP login to CDB service "FREE"
+# Open FREEPDB1 + SAVE STATE via TCP login to CDB service "FREE"
 log "opening PDB and saving state..."
 "$PODMAN" exec -e ORACLE_PWD="$ORACLE_PWD" -i "$NAME" bash -lc '
   . /home/oracle/.bashrc
@@ -98,18 +94,20 @@ for i in {1..60}; do
   sleep 3
 done
 
-# (Optional) Create app user idempotently
+# Create app user vector/vector idempotently (PL/SQL with standard quoting)
 log "creating PDB user 'vector' (idempotent)"
 "$PODMAN" exec -e ORACLE_PWD="$ORACLE_PWD" -i "$NAME" bash -lc '
   . /home/oracle/.bashrc
   sqlplus -S -L /nolog <<SQL
   CONNECT sys/${ORACLE_PWD}@127.0.0.1:1521/FREEPDB1 AS SYSDBA
-  DECLARE v_count number; BEGIN
+  DECLARE
+    v_count NUMBER;
+  BEGIN
     SELECT COUNT(*) INTO v_count FROM dba_users WHERE username = ''VECTOR'';
     IF v_count = 0 THEN
-      EXECUTE IMMEDIATE q''[CREATE USER vector IDENTIFIED BY vector]'';
-      EXECUTE IMMEDIATE q''[GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector]'';
-      EXECUTE IMMEDIATE q''[ALTER USER vector QUOTA UNLIMITED ON USERS]'';
+      EXECUTE IMMEDIATE ''CREATE USER vector IDENTIFIED BY "vector"'';
+      EXECUTE IMMEDIATE ''GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector'';
+      EXECUTE IMMEDIATE ''ALTER USER vector QUOTA UNLIMITED ON USERS'';
     END IF;
   END;
   /
@@ -122,25 +120,32 @@ DBSCR
 chmod +x /usr/local/bin/genai-db.sh
 
 # --------------------------------------------------------------------
-# Main setup script (your app deps etc.) — runs AFTER DB unit
-#  - also includes a user script that waits for container existence
+# /usr/local/bin/genai-setup.sh  (post-DB setup)
+#   - Installs Python 3.9
+#   - Creates venv **as opc**
+#   - Installs jupyterlab + oracledb in that venv
+#   - Waits for container existence, then FREEPDB1
 # --------------------------------------------------------------------
 cat >/usr/local/bin/genai-setup.sh <<'SCRIPT'
 #!/bin/bash
 set -Eeuo pipefail
 echo "===== GenAI OneClick setup: start $(date -u) ====="
 
-# You can add fuller provisioning here; keep minimal for speed.
-dnf -y install git unzip jq tar wget curl firewalld python3 python3-venv || true
+# Base packages
+dnf -y install git unzip jq tar wget curl firewalld || true
+
+# Python 3.9 toolchain
+dnf -y module enable python39 || true
+dnf -y install python39 python39-pip || true
 
 # Open firewall ports
 for p in 8888 8501 1521; do firewall-cmd --zone=public --add-port=${p}/tcp --permanent || true; done
 firewall-cmd --reload || true
 
-# Minimal Jupyter env for opc
-mkdir -p /home/opc/.venvs /home/opc/bin /opt/genai
-python3 -m venv /home/opc/.venvs/genai || true
-sudo -u opc bash -lc 'source $HOME/.venvs/genai/bin/activate && pip install --upgrade pip wheel && pip install jupyterlab oracledb'
+# Create venv as opc (avoid permission issues)
+sudo -u opc mkdir -p /home/opc/.venvs /home/opc/bin /opt/genai
+sudo -u opc /usr/bin/python3.9 -m venv /home/opc/.venvs/genai || true
+sudo -u opc bash -lc 'source $HOME/.venvs/genai/bin/activate && python -m pip install --upgrade pip wheel && python -m pip install "jupyterlab>=4,<5" oracledb'
 
 # User script that waits for container then for FREEPDB1
 cat >/opt/genai/init-genailabs.sh <<'USERSCRIPT'
@@ -173,7 +178,7 @@ SCRIPT
 chmod +x /usr/local/bin/genai-setup.sh
 
 # --------------------------------------------------------------------
-# systemd units (DB first, then setup)
+# systemd units — DB first, then setup
 # --------------------------------------------------------------------
 cat >/etc/systemd/system/genai-23ai.service <<'UNIT_DB'
 [Unit]
