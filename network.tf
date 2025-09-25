@@ -53,7 +53,7 @@ resource "oci_core_security_list" "public" {
     for_each = local.open_tcp_ports
     content {
       protocol    = "6"
-      source      = "0.0.0.0/0"
+      source      = local.allowed_cidr   # was "0.0.0.0/0"
       description = "Allow TCP port ${ingress_security_rules.value}"
       tcp_options {
         min = ingress_security_rules.value
