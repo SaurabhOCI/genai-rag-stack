@@ -3,6 +3,12 @@ variable "tenancy_ocid" {
   type        = string
 }
 
+variable "allowed_source_cidr" {
+  description = "CIDR allowed for inbound access (use x.x.x.x/32 for a single IP)."
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
 variable "home_region" {
   description = "Your tenancy's home region (e.g., ap-hyderabad-1)."
   type        = string
