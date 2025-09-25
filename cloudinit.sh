@@ -24,11 +24,54 @@ fi
 # PRE: install Podman so the DB unit can run right away
 # --------------------------------------------------------------------
 echo "[PRE] installing Podman and basics"
-dnf -y install dnf-plugins-core || true
+
+# Disable problematic repositories that might cause connectivity issues
+dnf config-manager --set-disabled ol8_ksplice || true
+
+# Clean and refresh cache
+dnf clean all || true
+dnf makecache --refresh || true
+
+# Enable required repositories with error handling
 dnf config-manager --set-enabled ol8_addons || true
-dnf -y makecache --refresh || true
-dnf -y install podman curl grep coreutils shadow-utils || true
-/usr/bin/podman --version || { echo "[PRE] podman missing"; exit 1; }
+dnf config-manager --set-enabled ol8_appstream || true
+dnf config-manager --set-enabled ol8_baseos_latest || true
+
+# Install core packages with retries
+install_with_retry() {
+    local max_attempts=3
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        echo "[PRE] Installation attempt $attempt of $max_attempts"
+        if dnf -y install podman curl grep coreutils shadow-utils git unzip; then
+            echo "[PRE] Installation successful"
+            return 0
+        else
+            echo "[PRE] Installation attempt $attempt failed, retrying..."
+            sleep 10
+            attempt=$((attempt + 1))
+        fi
+    done
+    
+    echo "[PRE] All installation attempts failed"
+    return 1
+}
+
+# Try installation with retries
+if ! install_with_retry; then
+    echo "[PRE] Critical: Could not install required packages"
+    exit 1
+fi
+
+# Verify critical tools are available
+if ! command -v podman >/dev/null 2>&1; then
+    echo "[PRE] Critical: podman not found after installation"
+    exit 1
+fi
+
+/usr/bin/podman --version || { echo "[PRE] podman installation verification failed"; exit 1; }
+echo "[PRE] Successfully installed Podman and dependencies"
 
 # ====================================================================
 # genai-setup.sh (MAIN provisioning) — kept from your original, with small fixes
