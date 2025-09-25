@@ -7,5 +7,5 @@ locals {
   open_tcp_ports = [for p in local.ports_strings : tonumber(p)]
 
   # If the user enters just an IPv4 (no mask), treat it as /32
-  allowed_cidr = contains(var.allowed_source_cidr, "/") ? var.allowed_source_cidr : "${var.allowed_source_cidr}/32"
+  allowed_cidr = can(regex("\\/\\d{1,2}$", var.allowed_source_cidr)) ? var.allowed_source_cidr : "${var.allowed_source_cidr}/32"
 }
