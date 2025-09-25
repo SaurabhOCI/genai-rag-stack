@@ -15,6 +15,7 @@ variables:
   boot_volume_size_gbs: { title: "Boot Volume Size (GB)", type: number, default: 100 }
   open_tcp_ports_csv: { title: "Open TCP Ports (CSV)", type: string, default: "22,8888,8501,1521" }
   create_policies: { title: "Create DG + Policies for Generative AI", type: boolean, default: true }
+  allowed_source_cidr: { title: "Allowed Source CIDR (e.g., 203.0.113.10/32)", type: string, default: "0.0.0.0/0" }
 variableGroups:
   - title: "Basics"
     variables: [tenancy_ocid, home_region, region, ssh_public_key]
@@ -24,3 +25,5 @@ variableGroups:
     variables: [instance_shape, instance_ocpus, instance_memory_gbs, boot_volume_size_gbs, open_tcp_ports_csv]
   - title: "IAM"
     variables: [create_policies]
+  - title: "Allowed Client IP"
+    variables: [open_tcp_ports_csv, allowed_source_cidr]
