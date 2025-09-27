@@ -40,7 +40,7 @@ output "ssh_connection_command" {
   description = "SSH connection command via bastion"
   value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.genai_ssh) > 0 ? (
     oci_bastion_session.genai_ssh[0].ssh_metadata != null ? 
-    oci_bastion_session.genai_ssh[0].ssh_metadata : 
+    try(oci_bastion_session.genai_ssh[0].ssh_metadata["command"], "Check OCI Console for SSH connection details") : 
     "Session created but SSH command not available yet. Check OCI Console for connection details."
   ) : "Direct SSH: ssh -i ~/.ssh/id_rsa opc@${oci_core_instance.genai.public_ip}"
   sensitive = false
@@ -50,7 +50,7 @@ output "jupyter_connection_command" {
   description = "Jupyter Lab connection command"
   value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.jupyter_tunnel) > 0 ? (
     oci_bastion_session.jupyter_tunnel[0].ssh_metadata != null ? 
-    "${oci_bastion_session.jupyter_tunnel[0].ssh_metadata} then access http://localhost:8888" : 
+    "${try(oci_bastion_session.jupyter_tunnel[0].ssh_metadata["command"], "Check OCI Console for connection details")} then access http://localhost:8888" : 
     "Session created but SSH command not available yet. Check OCI Console for connection details."
   ) : "Direct access: http://${oci_core_instance.genai.public_ip}:8888"
   sensitive = false
@@ -60,7 +60,7 @@ output "streamlit_connection_command" {
   description = "Streamlit connection command"
   value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.streamlit_tunnel) > 0 ? (
     oci_bastion_session.streamlit_tunnel[0].ssh_metadata != null ? 
-    "${oci_bastion_session.streamlit_tunnel[0].ssh_metadata} then access http://localhost:8501" : 
+    "${try(oci_bastion_session.streamlit_tunnel[0].ssh_metadata["command"], "Check OCI Console for connection details")} then access http://localhost:8501" : 
     "Session created but SSH command not available yet. Check OCI Console for connection details."
   ) : "Direct access: http://${oci_core_instance.genai.public_ip}:8501"
   sensitive = false
@@ -70,7 +70,7 @@ output "database_connection_command" {
   description = "Oracle database connection command"
   value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.database_tunnel) > 0 ? (
     oci_bastion_session.database_tunnel[0].ssh_metadata != null ? 
-    "${oci_bastion_session.database_tunnel[0].ssh_metadata} then connect to localhost:1521/FREEPDB1" : 
+    "${try(oci_bastion_session.database_tunnel[0].ssh_metadata["command"], "Check OCI Console for connection details")} then connect to localhost:1521/FREEPDB1" : 
     "Session created but SSH command not available yet. Check OCI Console for connection details."
   ) : "Direct connection: ${oci_core_instance.genai.public_ip}:1521/FREEPDB1"
   sensitive = false
