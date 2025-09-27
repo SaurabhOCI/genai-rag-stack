@@ -115,26 +115,27 @@ output "deployment_summary" {
 output "manual_connection_guide" {
   description = "Manual connection instructions for bastion sessions"
   value = var.enable_bastion_service ? <<-EOT
-    
-    === Manual Bastion Connection Guide ===
-    
-    1. List your bastion sessions:
-       oci bastion session list --bastion-id ${var.enable_bastion_service ? oci_bastion_bastion.genai_bastion[0].id : "BASTION_ID"}
-    
-    2. Get SSH connection command:
-       oci bastion session get --session-id SESSION_ID
-    
-    3. Use the connection command from the session details
-    
-    4. For port forwarding, modify the SSH command:
-       - Jupyter:   Add -L 8888:${oci_core_instance.genai.private_ip}:8888
-       - Streamlit: Add -L 8501:${oci_core_instance.genai.private_ip}:8501
-       - Database:  Add -L 1521:${oci_core_instance.genai.private_ip}:1521
-    
-    5. Access services at:
-       - Jupyter Lab: http://localhost:8888
-       - Streamlit:   http://localhost:8501
-       - Database:    localhost:1521/FREEPDB1 (user: vector, password: vector)
-    
-  EOT : "Bastion service not enabled. Use direct IP access."
+
+=== Manual Bastion Connection Guide ===
+
+1. List your bastion sessions:
+   oci bastion session list --bastion-id ${oci_bastion_bastion.genai_bastion[0].id}
+
+2. Get SSH connection command:
+   oci bastion session get --session-id SESSION_ID
+
+3. Use the connection command from the session details
+
+4. For port forwarding, modify the SSH command:
+   - Jupyter:   Add -L 8888:${oci_core_instance.genai.private_ip}:8888
+   - Streamlit: Add -L 8501:${oci_core_instance.genai.private_ip}:8501
+   - Database:  Add -L 1521:${oci_core_instance.genai.private_ip}:1521
+
+5. Access services at:
+   - Jupyter Lab: http://localhost:8888
+   - Streamlit:   http://localhost:8501
+   - Database:    localhost:1521/FREEPDB1 (user: vector, password: vector)
+
+EOT
+ : "Bastion service not enabled. Use direct IP access."
 }
