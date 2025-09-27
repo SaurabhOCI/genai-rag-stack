@@ -1,29 +1,21 @@
+# Get availability domains
 data "oci_identity_availability_domains" "ads" {
   compartment_id = var.tenancy_ocid
   provider       = oci.home
 }
 
-data "oci_core_images" "ol9" {
-  compartment_id           = var.tenancy_ocid
-  operating_system         = "Oracle Linux"
-  operating_system_version = "8"
-  shape                    = var.instance_shape
-  sort_by                  = "TIMECREATED"
-  sort_order               = "DESC"
-}
-
-resource "oci_core_instance" "dev" {
+# GenAI Instance
+resource "oci_core_instance" "genai" {
   availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
   compartment_id      = local.project_compartment_ocid
-  display_name        = "GEN-AI-LABS"
+  display_name        = "GENAI-RAG-INSTANCE"
+  shape               = var.instance_shape
 
   create_vnic_details {
-    subnet_id        = oci_core_subnet.public.id
-    assign_public_ip = true
-    hostname_label   = "genaivm"
+    subnet_id        = oci_core_subnet.private.id
+    assign_public_ip = !local.deploy_private_architecture
+    hostname_label   = "genai"
   }
-
-  shape = var.instance_shape
 
   shape_config {
     ocpus         = var.instance_ocpus
@@ -31,13 +23,18 @@ resource "oci_core_instance" "dev" {
   }
 
   source_details {
-    source_type = "image"
-    source_id   = local.rg_effective_image_ocid
+    source_type             = "image"
+    source_id               = local.rg_effective_image_ocid
+    boot_volume_size_in_gbs = var.boot_volume_size_gbs
   }
 
   metadata = {
     ssh_authorized_keys = var.ssh_public_key
-    user_data           = filebase64("${path.module}/cloudinit.sh")
+    user_data = base64encode(templatefile("${path.module}/cloudinit.sh", {
+      jupyter_enable_auth = var.jupyter_enable_auth
+      jupyter_password    = var.jupyter_password
+      bastion_enabled     = var.enable_bastion_service
+    }))
   }
 
   agent_config {
@@ -45,10 +42,23 @@ resource "oci_core_instance" "dev" {
     is_monitoring_disabled = false
   }
 
-  launch_options { network_type = "PARAVIRTUALIZED" }
-  instance_options { are_legacy_imds_endpoints_disabled = true }
+  launch_options { 
+    network_type = "PARAVIRTUALIZED" 
+  }
+  
+  instance_options { 
+    are_legacy_imds_endpoints_disabled = true 
+  }
 
-  timeouts { create = "60m" }
+  timeouts { 
+    create = "60m" 
+  }
+
+  freeform_tags = {
+    Purpose     = "genai-rag"
+    Environment = "production"
+    Stack       = "terraform"
+  }
 
   lifecycle {
     precondition {
