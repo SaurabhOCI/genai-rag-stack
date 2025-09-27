@@ -38,11 +38,6 @@ resource "oci_bastion_session" "genai_ssh" {
 
   display_name           = "genai-ssh-access"
   session_ttl_in_seconds = local.bastion_session_ttl_seconds
-  
-  freeform_tags = {
-    Purpose = "ssh-access"
-    Service = "genai-instance"
-  }
 }
 
 # Port Forwarding Session for Jupyter Lab
@@ -63,11 +58,6 @@ resource "oci_bastion_session" "jupyter_tunnel" {
 
   display_name           = "jupyter-web-access"
   session_ttl_in_seconds = local.bastion_session_ttl_seconds
-  
-  freeform_tags = {
-    Purpose = "web-access"
-    Service = "jupyter-lab"
-  }
 }
 
 # Port Forwarding Session for Streamlit
@@ -88,11 +78,6 @@ resource "oci_bastion_session" "streamlit_tunnel" {
 
   display_name           = "streamlit-web-access"
   session_ttl_in_seconds = local.bastion_session_ttl_seconds
-  
-  freeform_tags = {
-    Purpose = "web-access"
-    Service = "streamlit"
-  }
 }
 
 # Port Forwarding Session for Oracle Database
@@ -113,11 +98,6 @@ resource "oci_bastion_session" "database_tunnel" {
 
   display_name           = "oracle-db-access"
   session_ttl_in_seconds = local.bastion_session_ttl_seconds
-  
-  freeform_tags = {
-    Purpose = "database-access"
-    Service = "oracle-23ai"
-  }
 }
 
 # Dynamic Port Forwarding Session (SOCKS5)
@@ -135,9 +115,4 @@ resource "oci_bastion_session" "dynamic_tunnel" {
 
   display_name           = "genai-socks-tunnel"
   session_ttl_in_seconds = local.bastion_session_ttl_seconds
-  
-  freeform_tags = {
-    Purpose = "dynamic-forwarding"
-    Service = "development"
-  }
 }
