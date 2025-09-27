@@ -1,9 +1,3 @@
-variable "image_ocid" {
-  description = "Optional override: if set, use this image OCID instead of auto-discovery."
-  type        = string
-  default     = ""
-}
-
 # Region-agnostic Oracle Linux 8 image discovery in the CURRENT region of the provider/ORM stack
 data "oci_core_images" "rg_ol8_latest" {
   compartment_id           = var.tenancy_ocid
