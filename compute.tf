@@ -40,6 +40,22 @@ resource "oci_core_instance" "genai" {
   agent_config {
     is_management_disabled = false
     is_monitoring_disabled = false
+    
+    # Enable required plugins for bastion service
+    plugins_config {
+      name          = "Bastion"
+      desired_state = "ENABLED"
+    }
+    
+    plugins_config {
+      name          = "OS Management Service Agent"
+      desired_state = "ENABLED"
+    }
+    
+    plugins_config {
+      name          = "Compute Instance Monitoring"
+      desired_state = "ENABLED"
+    }
   }
 
   launch_options { 
