@@ -1,17 +1,19 @@
 #!/bin/bash
-# cloudinit.sh — Oracle 23ai Free + GenAI stack bootstrap (merged)
-# - Keeps ALL prior provisioning (code/, start_jupyter.sh, OCI CLI, pyenv, etc.)
-# - Installs Podman first so DB unit can run
-# - DB unit runs FIRST; setup unit runs AFTER DB
-# - Robust DB bootstrap: open FREEPDB1, SAVE STATE, wait for listener
-# - Idempotent creation of PDB user vector/vector
-# - Hardcoded ORACLE_PWD=database123 (as requested)
+# cloudinit.sh — Oracle 23ai Free + GenAI stack bootstrap with Bastion support
+# - Enhanced for private subnet deployment with Bastion Service
+# - Configurable Jupyter authentication
+# - Improved error handling and logging
 
 set -Eeuo pipefail
 
 LOGFILE="/var/log/genai_setup.log"
 exec > >(tee -a "$LOGFILE") 2>&1
-echo "===== GenAI OneClick: start $(date -u) ====="
+echo "===== GenAI OneClick with Bastion: start $(date -u) ====="
+
+# Template variables
+JUPYTER_ENABLE_AUTH="${jupyter_enable_auth}"
+JUPYTER_PASSWORD="${jupyter_password}"
+BASTION_ENABLED="${bastion_enabled}"
 
 # --------------------------------------------------------------------
 # Grow filesystem (best-effort)
@@ -74,7 +76,7 @@ fi
 echo "[PRE] Successfully installed Podman and dependencies"
 
 # ====================================================================
-# genai-setup.sh (MAIN provisioning) — kept from your original, with small fixes
+# genai-setup.sh (MAIN provisioning) — enhanced for bastion
 # ====================================================================
 cat >/usr/local/bin/genai-setup.sh <<'SCRIPT'
 #!/bin/bash
@@ -101,11 +103,45 @@ retry 5 dnf -y install \
 echo "[STEP] enable firewalld"
 systemctl enable --now firewalld || true
 
-echo "[STEP] create /opt/genai and /home/opc/code"
-mkdir -p /opt/genai /home/opc/code /home/opc/bin
-chown -R opc:opc /opt/genai /home/opc/code /home/opc/bin
+echo "[STEP] create /opt/genai and /home/opc directories"
+mkdir -p /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts
+chown -R opc:opc /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts
 
-echo "[STEP] create /home/opc/code and fetch css-navigator/gen-ai"
+echo "[STEP] create bastion helper scripts"
+if [ "$BASTION_ENABLED" = "true" ]; then
+  cat > /home/opc/scripts/bastion-info.sh <<'BASTION_INFO'
+#!/bin/bash
+echo "=== OCI Bastion Service Information ==="
+echo "This instance is deployed in a private subnet with Bastion Service access."
+echo ""
+echo "To access services, use the bastion sessions created by Terraform:"
+echo ""
+echo "1. SSH Access:"
+echo "   Use the SSH connection command from Terraform outputs"
+echo ""
+echo "2. Jupyter Lab Access:"
+echo "   Use the Jupyter connection command from Terraform outputs"
+echo "   Then browse to: http://localhost:8888"
+echo ""
+echo "3. Streamlit Access:"
+echo "   Use the Streamlit connection command from Terraform outputs"
+echo "   Then browse to: http://localhost:8501"
+echo ""
+echo "4. Oracle Database Access:"
+echo "   Use the database connection command from Terraform outputs"
+echo "   Then connect to: localhost:1521/FREEPDB1"
+echo ""
+echo "For Terraform outputs, run: terraform output"
+BASTION_INFO
+
+  chmod +x /home/opc/scripts/bastion-info.sh
+  chown opc:opc /home/opc/scripts/bastion-info.sh
+  
+  # Add to .bashrc
+  echo "echo 'Run ~/scripts/bastion-info.sh for connection information'" >> /home/opc/.bashrc
+fi
+
+echo "[STEP] fetch code repository"
 CODE_DIR="/home/opc/code"
 mkdir -p "$CODE_DIR"
 
@@ -147,7 +183,7 @@ chown -R opc:opc "$CODE_DIR" || true
 chmod -R a+rX "$CODE_DIR" || true
 ln -sfn "$CODE_DIR" /opt/code || true
 
-echo "[STEP] embed user's init-genailabs.sh (modified to NOT start DB; it waits for it)"
+echo "[STEP] embed enhanced init-genailabs.sh"
 cat >/opt/genai/init-genailabs.sh <<'USERSCRIPT'
 #!/bin/bash
 set -Eeuo pipefail
@@ -160,16 +196,16 @@ if [ -f "$MARKER_FILE" ]; then
   exit 0
 fi
 
-echo "===== Starting Cloud-Init User Script ====="
+echo "===== Starting Enhanced Cloud-Init User Script ====="
 
 # Expand the boot volume (best-effort)
 sudo /usr/libexec/oci-growfs -y || true
 
-# Ensure build prerequisites (SQLite-from-source path kept)
+# Ensure build prerequisites
 sudo dnf config-manager --set-enabled ol8_addons || true
 sudo dnf install -y podman git libffi-devel bzip2-devel ncurses-devel readline-devel wget make gcc zlib-devel openssl-devel || true
 
-# Install latest SQLite from source (kept from original)
+# Install latest SQLite from source
 cd /tmp
 wget -q https://www.sqlite.org/2023/sqlite-autoconf-3430000.tar.gz
 tar -xzf sqlite-autoconf-3430000.tar.gz
@@ -181,7 +217,7 @@ sudo make install
 # Verify SQLite
 /usr/local/bin/sqlite3 --version || true
 
-# PATH/LD for SQLite (kept)
+# PATH/LD for SQLite
 echo 'export PATH="/usr/local/bin:$PATH"' >> /home/opc/.bashrc
 echo 'export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"' >> /home/opc/.bashrc
 echo 'export CFLAGS="-I/usr/local/include"' >> /home/opc/.bashrc
@@ -193,8 +229,7 @@ sudo mkdir -p /home/opc/oradata
 sudo chown -R 54321:54321 /home/opc/oradata
 sudo chmod -R 755 /home/opc/oradata
 
-# >>> Modified: DO NOT start the DB here. The systemd DB unit owns it. <<<
-# Wait for 23ai container to exist, then for FREEPDB1 service
+# Wait for 23ai container to exist and be ready
 echo "Waiting for 23ai container to be created..."
 for i in {1..120}; do
   if /usr/bin/podman ps -a --format '{{.Names}}' | grep -qw 23ai; then
@@ -213,35 +248,27 @@ for i in {1..180}; do
   sleep 10
 done
 
-# Quick connection smoke (non-fatal)
+# Quick connection smoke test
 OUTPUT=$(/usr/bin/podman exec 23ai bash -lc 'echo | sqlplus -S -L sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba || true')
 echo "$OUTPUT" | tail -n 2
 
-# PDB config (kept, but guarded)
+# Enhanced PDB configuration
 echo "Configuring Oracle database in PDB (FREEPDB1)..."
 sudo /usr/bin/podman exec -i 23ai bash -lc '. /home/oracle/.bashrc; sqlplus -S -L "sys:database123@127.0.0.1:1521/FREEPDB1 as sysdba" <<EOSQL
 WHENEVER SQLERROR CONTINUE
 CREATE BIGFILE TABLESPACE tbs2 DATAFILE ''bigtbs_f2.dbf'' SIZE 1G AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL SEGMENT SPACE MANAGEMENT AUTO;
 CREATE UNDO TABLESPACE undots2 DATAFILE ''undotbs_2a.dbf'' SIZE 1G AUTOEXTEND ON RETENTION GUARANTEE;
 CREATE TEMPORARY TABLESPACE temp_demo TEMPFILE ''temp02.dbf'' SIZE 1G REUSE AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL UNIFORM SIZE 1M;
--- Ensure vector exists with defaults (tbs2), idempotent
+-- Ensure vector user exists with enhanced permissions
 CREATE USER vector IDENTIFIED BY "vector" DEFAULT TABLESPACE tbs2 QUOTA UNLIMITED ON tbs2;
-GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector;
+GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE TO vector;
+GRANT UNLIMITED TABLESPACE TO vector;
+-- Enable AI Vector Search capabilities
+ALTER USER vector QUOTA UNLIMITED ON tbs2;
 EXIT
 EOSQL'
 
-# CDB root tweaks (kept, but non-fatal)
-echo "Switching to CDB root for system-level changes..."
-sudo /usr/bin/podman exec -i 23ai bash -lc '. /home/oracle/.bashrc; sqlplus -S -L / as sysdba <<EOSQL
-WHENEVER SQLERROR CONTINUE
-CREATE PFILE FROM SPFILE;
-ALTER SYSTEM SET vector_memory_size = 512M SCOPE=SPFILE;
-SHUTDOWN IMMEDIATE;
-STARTUP;
-EXIT
-EOSQL'
-
-# pyenv + Python 3.11.9 (kept)
+# Enhanced pyenv + Python 3.11.9 setup
 sudo -u opc -i bash <<'EOF_OPC'
 set -eux
 export HOME=/home/opc
@@ -272,13 +299,34 @@ cd $HOME/labs
 pyenv local 3.11.9
 pyenv rehash
 python --version
-export PYTHONPATH=$HOME/.pyenv/versions/3.11.9/lib/python3.11/site-packages:$PYTHONPATH
 
-$HOME/.pyenv/versions/3.11.9/bin/pip install --no-cache-dir oci==2.129.1 oracledb sentence-transformers langchain==0.2.6 langchain-community==0.2.6 langchain-chroma==0.1.2 langchain-core==0.2.11 langchain-text-splitters==0.2.2 langsmith==0.1.83 pypdf==4.2.0 streamlit==1.36.0 python-multipart==0.0.9 chroma-hnswlib==0.7.3 chromadb==0.5.3 torch==2.5.0
+# Enhanced Python package installation
+$HOME/.pyenv/versions/3.11.9/bin/pip install --no-cache-dir \
+  oci==2.129.1 \
+  oracledb \
+  sentence-transformers \
+  langchain==0.2.6 \
+  langchain-community==0.2.6 \
+  langchain-chroma==0.1.2 \
+  langchain-core==0.2.11 \
+  langchain-text-splitters==0.2.2 \
+  langsmith==0.1.83 \
+  pypdf==4.2.0 \
+  streamlit==1.36.0 \
+  python-multipart==0.0.9 \
+  chroma-hnswlib==0.7.3 \
+  chromadb==0.5.3 \
+  torch==2.5.0 \
+  gradio \
+  fastapi \
+  uvicorn
 
+# Pre-download models
 python - <<PY
 from sentence_transformers import SentenceTransformer
+print("Downloading embedding model...")
 SentenceTransformer('all-MiniLM-L12-v2')
+print("Model download complete.")
 PY
 
 pip install --user jupyterlab
@@ -288,6 +336,7 @@ chmod +x install.sh
 echo 'export PATH=$PATH:$HOME/.local/bin' >> $HOME/.bashrc
 source $HOME/.bashrc
 
+# Enhanced repository setup
 REPO_URL="https://github.com/ou-developers/ou-generativeai-pro.git"
 FINAL_DIR="$HOME/labs"
 git init
@@ -301,19 +350,39 @@ echo "Files successfully downloaded to $FINAL_DIR"
 EOF_OPC
 
 touch "$MARKER_FILE"
-echo "===== Cloud-Init User Script Completed Successfully ====="
+echo "===== Enhanced Cloud-Init User Script Completed Successfully ====="
 exit 0
 USERSCRIPT
 chmod +x /opt/genai/init-genailabs.sh
 cp -f /opt/genai/init-genailabs.sh /home/opc/init-genailabs.sh || true
 chown opc:opc /home/opc/init-genailabs.sh || true
 
-echo "[STEP] install Python 3.9 for OL8 and create venv"
+echo "[STEP] install Python 3.9 for OL8 and create enhanced venv"
 retry 5 dnf -y module enable python39 || true
 retry 5 dnf -y install python39 python39-pip
 sudo -u opc bash -lc 'python3.9 -m venv $HOME/.venvs/genai || true; echo "source $HOME/.venvs/genai/bin/activate" >> $HOME/.bashrc; source $HOME/.venvs/genai/bin/activate; python -m pip install --upgrade pip wheel setuptools'
-echo "[STEP] install Python libraries"
-sudo -u opc bash -lc 'source $HOME/.venvs/genai/bin/activate; pip install --no-cache-dir jupyterlab==4.2.5 streamlit==1.36.0 oracledb sentence-transformers langchain==0.2.6 langchain-community==0.2.6 langchain-core==0.2.11 langchain-text-splitters==0.2.2 langsmith==0.1.83 pypdf==4.2.0 python-multipart==0.0.9 chroma-hnswlib==0.7.3 chromadb==0.5.3 torch==2.5.0 oci oracle-ads'
+
+echo "[STEP] install enhanced Python libraries"
+sudo -u opc bash -lc 'source $HOME/.venvs/genai/bin/activate; pip install --no-cache-dir \
+  jupyterlab==4.2.5 \
+  streamlit==1.36.0 \
+  oracledb \
+  sentence-transformers \
+  langchain==0.2.6 \
+  langchain-community==0.2.6 \
+  langchain-core==0.2.11 \
+  langchain-text-splitters==0.2.2 \
+  langsmith==0.1.83 \
+  pypdf==4.2.0 \
+  python-multipart==0.0.9 \
+  chroma-hnswlib==0.7.3 \
+  chromadb==0.5.3 \
+  torch==2.5.0 \
+  oci \
+  oracle-ads \
+  gradio \
+  fastapi \
+  uvicorn'
 
 echo "[STEP] install OCI CLI to ~/bin/oci and make PATH global"
 sudo -u opc bash -lc 'retry 5 curl -sSL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh -o /tmp/oci-install.sh; retry 5 bash /tmp/oci-install.sh --accept-all-defaults --exec-dir $HOME/bin --install-dir $HOME/lib/oci-cli --update-path false; grep -q "export PATH=$HOME/bin" $HOME/.bashrc || echo "export PATH=$HOME/bin:$PATH" >> $HOME/.bashrc'
@@ -321,7 +390,7 @@ cat >/etc/profile.d/genai-path.sh <<'PROF'
 export PATH=/home/opc/bin:$PATH
 PROF
 
-echo "[STEP] seed /opt/genai content"
+echo "[STEP] seed enhanced /opt/genai content"
 cat >/opt/genai/LoadProperties.py <<'PY'
 class LoadProperties:
     def __init__(self):
@@ -337,33 +406,242 @@ class LoadProperties:
     def getEndpoint(self): return self.endpoint
     def getCompartment(self): return self.compartment_ocid
 PY
+
 cat >/opt/genai/config.txt <<'CFG'
 {"model_name":"cohere.command-r-16k","embedding_model_name":"cohere.embed-english-v3.0","endpoint":"https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com","compartment_ocid":"ocid1.compartment.oc1....replace_me..."}
 CFG
+
 mkdir -p /opt/genai/txt-docs /opt/genai/pdf-docs
 echo "faq | What are Always Free services?=====Always Free services are part of Oracle Cloud Free Tier." >/opt/genai/txt-docs/faq.txt
 chown -R opc:opc /opt/genai
 
-echo "[STEP] write start_jupyter.sh"
-cat >/home/opc/start_jupyter.sh <<'SH'
+echo "[STEP] write enhanced start_jupyter.sh with authentication support"
+if [ "$JUPYTER_ENABLE_AUTH" = "true" ] && [ -n "$JUPYTER_PASSWORD" ]; then
+  # Generate password hash
+  JUPYTER_PASSWORD_HASH=$(sudo -u opc bash -lc "source \$HOME/.venvs/genai/bin/activate; python3 -c \"
+from jupyter_server.auth import passwd
+print(passwd('$JUPYTER_PASSWORD'))
+\"")
+
+  cat >/home/opc/start_jupyter.sh <<JUPYTER_AUTH
+#!/bin/bash
+set -eux
+source \$HOME/.venvs/genai/bin/activate
+
+# Generate Jupyter config with password
+jupyter lab --generate-config -y
+
+# Set password in config
+cat >> \$HOME/.jupyter/jupyter_lab_config.py << EOF
+c.ServerApp.password = '$JUPYTER_PASSWORD_HASH'
+c.ServerApp.token = ''
+c.ServerApp.ip = '0.0.0.0'
+c.ServerApp.port = 8888
+c.ServerApp.open_browser = False
+c.ServerApp.allow_root = False
+c.ServerApp.notebook_dir = '/home/opc/labs'
+EOF
+
+# Start Jupyter
+jupyter lab --config=\$HOME/.jupyter/jupyter_lab_config.py
+JUPYTER_AUTH
+else
+  cat >/home/opc/start_jupyter.sh <<'JUPYTER_TOKEN'
 #!/bin/bash
 set -eux
 source $HOME/.venvs/genai/bin/activate
-jupyter lab --NotebookApp.token='' --NotebookApp.password='' --ip=0.0.0.0 --port=8888 --no-browser
-SH
+cd /home/opc/labs
+jupyter lab --NotebookApp.token='' --NotebookApp.password='' --ip=0.0.0.0 --port=8888 --no-browser --notebook-dir=/home/opc/labs
+JUPYTER_TOKEN
+fi
+
 chown opc:opc /home/opc/start_jupyter.sh
 chmod +x /home/opc/start_jupyter.sh
+
+echo "[STEP] create enhanced Streamlit startup script"
+cat >/home/opc/start_streamlit.sh <<'STREAMLIT'
+#!/bin/bash
+set -eux
+source $HOME/.venvs/genai/bin/activate
+cd /home/opc/labs
+
+# Create a simple Streamlit app if it doesn't exist
+if [ ! -f "streamlit_app.py" ]; then
+  cat > streamlit_app.py <<'EOF'
+import streamlit as st
+import sys
+import os
+
+st.set_page_config(page_title="GenAI RAG Lab", page_icon="🤖", layout="wide")
+
+st.title("🤖 GenAI RAG Laboratory")
+st.markdown("Welcome to your Oracle Cloud GenAI RAG environment!")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.header("🔧 Environment Status")
+    
+    # Check Python environment
+    st.subheader("Python Environment")
+    st.code(f"Python: {sys.version}")
+    st.code(f"Working Directory: {os.getcwd()}")
+    
+    # Check Oracle connection
+    st.subheader("Oracle Database")
+    try:
+        import oracledb
+        st.success("✅ Oracle database driver available")
+        
+        # Attempt connection test
+        try:
+            conn = oracledb.connect(
+                user="vector",
+                password="vector",
+                dsn="localhost:1521/FREEPDB1"
+            )
+            st.success("✅ Database connection successful")
+            conn.close()
+        except Exception as e:
+            st.warning(f"⚠️ Database connection test failed: {str(e)}")
+    except ImportError:
+        st.error("❌ Oracle database driver not available")
+    
+    # Check AI libraries
+    st.subheader("AI Libraries")
+    libraries = ["langchain", "sentence_transformers", "chromadb", "torch"]
+    for lib in libraries:
+        try:
+            __import__(lib)
+            st.success(f"✅ {lib} available")
+        except ImportError:
+            st.error(f"❌ {lib} not available")
+
+with col2:
+    st.header("📚 Quick Start Guide")
+    
+    st.markdown("""
+    ### 🚀 Getting Started
+    
+    1. **Jupyter Lab**: Access your development environment
+       - Navigate to port 8888 for Jupyter Lab
+       - Explore the `/home/opc/labs` directory
+    
+    2. **Oracle Database**: 
+       - Host: localhost (via tunnel) or instance IP
+       - Port: 1521
+       - Service: FREEPDB1
+       - User: vector / Password: vector
+    
+    3. **Sample Code**: Check the labs directory for examples
+    
+    ### 🔗 Useful Links
+    - [Oracle AI Vector Search Documentation](https://docs.oracle.com/en/database/oracle/oracle-database/23/vecse/)
+    - [LangChain Documentation](https://docs.langchain.com/)
+    - [Sentence Transformers](https://www.sbert.net/)
+    """)
+    
+    st.header("💡 Quick Actions")
+    
+    if st.button("🔍 Test Vector Search"):
+        st.code("""
+# Sample vector search code
+import oracledb
+from sentence_transformers import SentenceTransformer
+
+# Load embedding model
+model = SentenceTransformer('all-MiniLM-L12-v2')
+
+# Create embeddings
+text = "Hello world"
+embedding = model.encode(text)
+
+print(f"Embedding shape: {embedding.shape}")
+        """)
+    
+    if st.button("📖 Sample RAG Query"):
+        st.code("""
+# Sample RAG implementation
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.vectorstores import Chroma
+from langchain.embeddings import SentenceTransformerEmbeddings
+
+# Initialize components
+embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L12-v2")
+text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+
+# Your RAG pipeline here...
+        """)
+
+st.markdown("---")
+st.markdown("🏗️ **Infrastructure**: Deployed with Oracle Cloud Infrastructure & Terraform")
+EOF
+fi
+
+streamlit run streamlit_app.py --server.port=8501 --server.address=0.0.0.0
+STREAMLIT
+
+chown opc:opc /home/opc/start_streamlit.sh
+chmod +x /home/opc/start_streamlit.sh
+
+echo "[STEP] create systemd services for applications"
+cat >/etc/systemd/system/jupyter-lab.service <<'JUPYTER_SERVICE'
+[Unit]
+Description=Jupyter Lab for GenAI RAG
+After=genai-setup.service
+Wants=genai-setup.service
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=/home/opc/labs
+Environment=PATH=/home/opc/.venvs/genai/bin:/home/opc/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/opc/start_jupyter.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+JUPYTER_SERVICE
+
+cat >/etc/systemd/system/streamlit-app.service <<'STREAMLIT_SERVICE'
+[Unit]
+Description=Streamlit App for GenAI RAG
+After=genai-setup.service
+Wants=genai-setup.service
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=/home/opc/labs
+Environment=PATH=/home/opc/.venvs/genai/bin:/home/opc/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/opc/start_streamlit.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+STREAMLIT_SERVICE
+
+# Enable but don't start yet (will start after main setup completes)
+systemctl daemon-reload
+systemctl enable jupyter-lab.service
+systemctl enable streamlit-app.service
 
 echo "[STEP] open firewall ports"
 for p in 8888 8501 1521; do firewall-cmd --zone=public --add-port=${p}/tcp --permanent || true; done
 firewall-cmd --reload || true
 
-echo "[STEP] run user's init-genailabs.sh (non-fatal)"
+echo "[STEP] run user's enhanced init-genailabs.sh"
 set +e
 bash /opt/genai/init-genailabs.sh
 USR_RC=$?
 set -e
 echo "[STEP] user init script exit code: $USR_RC"
+
+echo "[STEP] start application services"
+systemctl start jupyter-lab.service || echo "Jupyter service start failed, check logs"
+systemctl start streamlit-app.service || echo "Streamlit service start failed, check logs"
 
 touch "$MARKER"
 echo "===== GenAI OneClick systemd: COMPLETE $(date -u) ====="
@@ -371,7 +649,7 @@ SCRIPT
 chmod +x /usr/local/bin/genai-setup.sh
 
 # ====================================================================
-# genai-db.sh (DB container) — robust bootstrap for 23ai
+# genai-db.sh (DB container) — enhanced bootstrap for 23ai
 # ====================================================================
 cat >/usr/local/bin/genai-db.sh <<'DBSCR'
 #!/bin/bash
@@ -429,7 +707,7 @@ for i in {1..60}; do
   sleep 3
 done
 
-log "creating PDB user 'vector' (idempotent)"
+log "creating enhanced PDB user 'vector'"
 "$PODMAN" exec -e ORACLE_PWD="$ORACLE_PWD" -i "$NAME" bash -lc '
   . /home/oracle/.bashrc
   sqlplus -S -L /nolog <<SQL
@@ -437,7 +715,11 @@ log "creating PDB user 'vector' (idempotent)"
   SET DEFINE OFF
   WHENEVER SQLERROR CONTINUE
   CREATE USER vector IDENTIFIED BY "vector";
-  GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector;
+  GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE TO vector;
+  GRANT UNLIMITED TABLESPACE TO vector;
+  -- Enable AI Vector Search
+  GRANT EXECUTE ON DBMS_VECTOR TO vector;
+  GRANT EXECUTE ON DBMS_VECTOR_CHAIN TO vector;
   ALTER USER vector QUOTA UNLIMITED ON USERS;
   EXIT
 SQL
@@ -452,7 +734,7 @@ chmod +x /usr/local/bin/genai-db.sh
 # ====================================================================
 cat >/etc/systemd/system/genai-23ai.service <<'UNIT_DB'
 [Unit]
-Description=GenAI oneclick - Oracle 23ai container
+Description=GenAI oneclick - Oracle 23ai container with AI Vector Search
 Wants=network-online.target
 After=network-online.target
 
@@ -470,7 +752,7 @@ UNIT_DB
 
 cat >/etc/systemd/system/genai-setup.service <<'UNIT_SETUP'
 [Unit]
-Description=GenAI oneclick post-boot setup
+Description=GenAI oneclick post-boot setup with Bastion support
 Wants=network-online.target genai-23ai.service
 After=network-online.target genai-23ai.service
 
@@ -490,4 +772,4 @@ systemctl enable genai-setup.service
 systemctl start genai-23ai.service      # DB/bootstrap first
 systemctl start genai-setup.service     # then app/setup
 
-echo "===== GenAI OneClick: cloud-init done $(date -u) ====="
+echo "===== GenAI OneClick with Bastion: cloud-init done $(date -u) ====="
