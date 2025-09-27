@@ -13,6 +13,70 @@ variable "region" {
   type        = string
 }
 
+variable "ssh_public_key" {
+  description = "Your SSH public key (ssh-rsa ...)."
+  type        = string
+}
+
+# Bastion Service Variables
+variable "enable_bastion_service" {
+  description = "Enable OCI Bastion Service for secure access"
+  type        = bool
+  default     = true
+}
+
+variable "enable_bastion_sessions" {
+  description = "Create default bastion sessions automatically"
+  type        = bool
+  default     = true
+}
+
+variable "bastion_session_ttl" {
+  description = "Bastion session TTL in hours (1-3 hours)"
+  type        = number
+  default     = 3
+  
+  validation {
+    condition     = var.bastion_session_ttl >= 1 && var.bastion_session_ttl <= 3
+    error_message = "Bastion session TTL must be between 1 and 3 hours."
+  }
+}
+
+# IP Access Control
+variable "allowed_ssh_cidrs" {
+  description = "Comma-separated list of CIDR blocks allowed SSH access"
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
+variable "allowed_web_cidrs" {
+  description = "Comma-separated list of CIDR blocks allowed web access"
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
+# Network Configuration
+variable "enable_nat_gateway" {
+  description = "Enable NAT Gateway for private subnet internet access"
+  type        = bool
+  default     = true
+}
+
+# Authentication
+variable "jupyter_enable_auth" {
+  description = "Enable authentication for Jupyter Lab"
+  type        = bool
+  default     = true
+}
+
+variable "jupyter_password" {
+  description = "Password for Jupyter Lab access"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+# Compartment Configuration
 variable "create_compartment" {
   description = "Whether to create a new project compartment."
   type        = bool
@@ -34,14 +98,10 @@ variable "project_compartment_ocid" {
 variable "compartment_name" {
   description = "Project compartment name."
   type        = string
-  default     = "genai-oneclick-project"
+  default     = "genai-rag-project"
 }
 
-variable "ssh_public_key" {
-  description = "Your SSH public key (ssh-rsa ...)."
-  type        = string
-}
-
+# Instance Configuration
 variable "instance_shape" {
   description = "Compute shape."
   type        = string
@@ -76,4 +136,11 @@ variable "create_policies" {
   description = "Create instance-principal DG and Policies for Generative AI?"
   type        = bool
   default     = true
+}
+
+# Image override (from original stack)
+variable "image_ocid" {
+  description = "Optional override: if set, use this image OCID instead of auto-discovery."
+  type        = string
+  default     = ""
 }
