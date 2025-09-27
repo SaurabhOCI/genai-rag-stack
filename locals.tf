@@ -3,9 +3,9 @@ locals {
   parent_for_project       = trimspace(var.parent_compartment_ocid) != "" ? var.parent_compartment_ocid : var.tenancy_ocid
   project_compartment_ocid = var.create_compartment ? oci_identity_compartment.project[0].id : var.project_compartment_ocid
 
-  # Parse IP ranges
-  allowed_ssh_cidrs_list = [for cidr in split(",", var.allowed_ssh_cidrs) : trim(cidr)]
-  allowed_web_cidrs_list = [for cidr in split(",", var.allowed_web_cidrs) : trim(cidr)]
+  # Parse IP ranges - fixed trim function calls
+  allowed_ssh_cidrs_list = [for cidr in split(",", var.allowed_ssh_cidrs) : trimspace(cidr)]
+  allowed_web_cidrs_list = [for cidr in split(",", var.allowed_web_cidrs) : trimspace(cidr)]
   
   # Parse TCP ports
   ports_strings  = [for p in split(",", var.open_tcp_ports_csv) : trimspace(p)]
