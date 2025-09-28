@@ -11,6 +11,10 @@ JUPYTER_ENABLE_AUTH="${jupyter_enable_auth}"
 JUPYTER_PASSWORD="${jupyter_password}"
 BASTION_ENABLED="${bastion_enabled}"
 
+# Pass template variables to the environment - FIX 1
+echo "export JUPYTER_PASSWORD_ENV='${jupyter_password}'" >> /home/opc/.bashrc
+echo "export JUPYTER_ENABLE_AUTH_ENV='${jupyter_enable_auth}'" >> /home/opc/.bashrc
+
 # --------------------------------------------------------------------
 # Grow filesystem
 # --------------------------------------------------------------------
@@ -48,6 +52,10 @@ echo "[STEP] Creating directories"
 mkdir -p /opt/genai /home/opc/{code,bin,scripts,.venvs,oradata}
 chown -R opc:opc /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts /home/opc/.venvs
 chown -R 54321:54321 /home/opc/oradata || true
+
+# Create password file for Jupyter - FIX 1 continued
+echo "${jupyter_password}" > /tmp/jupyter_password.txt
+chown opc:opc /tmp/jupyter_password.txt
 
 # --------------------------------------------------------------------
 # Create setup scripts
@@ -117,25 +125,52 @@ class LoadProperties:
     def getCompartment(self): return self.compartment_ocid
 LOADPROPS
 
+# FIX 2: Bulletproof Code Download
 echo "[STEP] Download sample code repositories"
 CODE_DIR="/home/opc/code"
+mkdir -p "$CODE_DIR"
 
-# Simple wget approach
-cd /tmp
-if wget -q --timeout=30 https://github.com/ou-developers/css-navigator/archive/refs/heads/main.zip; then
-    unzip -q main.zip
-    if [ -d css-navigator-main/gen-ai ]; then
-        cp -r css-navigator-main/gen-ai/* "$CODE_DIR"/ 2>/dev/null || true
-        echo "Code downloaded successfully"
+# Multiple download strategies
+download_success=false
+
+# Strategy 1: Direct wget
+if ! $download_success; then
+    echo "Trying wget download..."
+    cd /tmp
+    if timeout 60 wget -q --no-check-certificate https://github.com/ou-developers/css-navigator/archive/refs/heads/main.zip; then
+        if unzip -q main.zip && [ -d css-navigator-main/gen-ai ]; then
+            cp -r css-navigator-main/gen-ai/* "$CODE_DIR"/ 2>/dev/null && download_success=true
+            echo "✓ Code downloaded via wget"
+        fi
+        rm -rf css-navigator-main main.zip
     fi
-    rm -rf css-navigator-main main.zip
-else
-    echo "Code download failed - will be available manually"
 fi
 
-# Set ownership regardless
+# Strategy 2: curl fallback
+if ! $download_success; then
+    echo "Trying curl download..."
+    cd /tmp
+    if timeout 60 curl -sL https://github.com/ou-developers/css-navigator/archive/refs/heads/main.zip -o main.zip; then
+        if unzip -q main.zip && [ -d css-navigator-main/gen-ai ]; then
+            cp -r css-navigator-main/gen-ai/* "$CODE_DIR"/ 2>/dev/null && download_success=true
+            echo "✓ Code downloaded via curl"
+        fi
+        rm -rf css-navigator-main main.zip
+    fi
+fi
+
+# Strategy 3: Create basic structure if all fails
+if ! $download_success; then
+    echo "⚠ Downloads failed - creating basic structure"
+    echo "# Sample notebook" > "$CODE_DIR/sample.ipynb"
+    echo "print('Hello from Jupyter!')" > "$CODE_DIR/hello.py"
+    echo "# GenAI Sample Files" > "$CODE_DIR/README.md"
+    echo "Files will be available for manual download" >> "$CODE_DIR/README.md"
+fi
+
+# Always set proper ownership
 chown -R opc:opc "$CODE_DIR"
-chmod -R a+rX "$CODE_DIR"
+chmod -R 755 "$CODE_DIR"
 
 cat > /opt/genai/config.txt << 'CONFIG'
 {"model_name":"cohere.command-r-16k","embedding_model_name":"cohere.embed-english-v3.0","endpoint":"https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com","compartment_ocid":"ocid1.compartment.oc1....replace_me..."}
@@ -144,40 +179,41 @@ CONFIG
 echo "faq | What are Always Free services?=====Always Free services are part of Oracle Cloud Free Tier." > /opt/genai/txt-docs/faq.txt
 chown -R opc:opc /opt/genai
 
-# Create Jupyter startup script with authentication support
-cat > /home/opc/start-jupyter.sh << 'JUPYTER'
+# FIX 1: Create Jupyter startup script with robust password handling
+cat > /home/opc/start-jupyter.sh << 'JUPYTER_EOF'
 #!/bin/bash
 source ~/.venvs/genai/bin/activate
 export JUPYTER_CONFIG_DIR=/home/opc/.jupyter
-
-# Create jupyter config directory
 mkdir -p $JUPYTER_CONFIG_DIR
 
-# Generate Jupyter config if it doesn't exist
-if [ ! -f $JUPYTER_CONFIG_DIR/jupyter_lab_config.py ]; then
-    jupyter lab --generate-config
+# Check for password from multiple sources
+JUPYTER_PASSWORD=""
+if [ -f /tmp/jupyter_password.txt ]; then
+    JUPYTER_PASSWORD=$(cat /tmp/jupyter_password.txt)
+elif [ -n "$JUPYTER_PASSWORD_ENV" ]; then
+    JUPYTER_PASSWORD="$JUPYTER_PASSWORD_ENV"
 fi
 
-# Configure authentication based on template variables
+# Check authentication flag
+JUPYTER_ENABLE_AUTH="${JUPYTER_ENABLE_AUTH_ENV:-false}"
+
 if [ "$JUPYTER_ENABLE_AUTH" = "true" ] && [ -n "$JUPYTER_PASSWORD" ]; then
+    echo "Setting up Jupyter with password authentication..."
     python3 -c "
 from jupyter_server.auth import passwd
-import os
-config_file = os.path.expanduser('~/.jupyter/jupyter_lab_config.py')
-with open(config_file, 'a') as f:
-    f.write(f\"\\nc.ServerApp.password = '{passwd('$JUPYTER_PASSWORD')}'\\n\")
+with open('/home/opc/.jupyter/jupyter_lab_config.py', 'w') as f:
+    f.write(f\"c.ServerApp.password = '{passwd('$JUPYTER_PASSWORD')}'\\n\")
     f.write('c.ServerApp.allow_remote_access = True\\n')
     f.write('c.ServerApp.ip = \"0.0.0.0\"\\n')
     f.write('c.ServerApp.port = 8888\\n')
     f.write('c.ServerApp.open_browser = False\\n')
-print('Jupyter password authentication configured')
 "
     jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 else
-    # No authentication mode for easier development access
-    jupyter lab --NotebookApp.token='' --NotebookApp.password='' --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+    echo "Starting Jupyter without authentication..."
+    jupyter lab --LabApp.token='' --LabApp.password='' --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 fi
-JUPYTER
+JUPYTER_EOF
 chown opc:opc /home/opc/start-jupyter.sh
 chmod +x /home/opc/start-jupyter.sh
 
