@@ -117,6 +117,26 @@ class LoadProperties:
     def getCompartment(self): return self.compartment_ocid
 LOADPROPS
 
+echo "[STEP] Download sample code repositories"
+CODE_DIR="/home/opc/code"
+
+# Simple wget approach
+cd /tmp
+if wget -q --timeout=30 https://github.com/ou-developers/css-navigator/archive/refs/heads/main.zip; then
+    unzip -q main.zip
+    if [ -d css-navigator-main/gen-ai ]; then
+        cp -r css-navigator-main/gen-ai/* "$CODE_DIR"/ 2>/dev/null || true
+        echo "Code downloaded successfully"
+    fi
+    rm -rf css-navigator-main main.zip
+else
+    echo "Code download failed - will be available manually"
+fi
+
+# Set ownership regardless
+chown -R opc:opc "$CODE_DIR"
+chmod -R a+rX "$CODE_DIR"
+
 cat > /opt/genai/config.txt << 'CONFIG'
 {"model_name":"cohere.command-r-16k","embedding_model_name":"cohere.embed-english-v3.0","endpoint":"https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com","compartment_ocid":"ocid1.compartment.oc1....replace_me..."}
 CONFIG
