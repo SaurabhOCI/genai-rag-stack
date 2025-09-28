@@ -35,13 +35,27 @@ output "bastion_service_name" {
   value = var.enable_bastion_service ? oci_bastion_bastion.genai_bastion[0].name : null
 }
 
-# Session Connection Commands
+# Bastion Plugin Status
+output "bastion_plugin_status" {
+  description = "Status of the Bastion plugin on the target instance"
+  value = var.enable_bastion_service && var.enable_bastion_sessions && length(data.external.bastion_plugin_status) > 0 ? {
+    ready  = data.external.bastion_plugin_status[0].result.ready
+    status = data.external.bastion_plugin_status[0].result.status
+  } : null
+}
+
+# Connection Commands - Enhanced with fallback options
 output "ssh_connection_command" {
   description = "SSH connection command via bastion"
-  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.genai_ssh) > 0 ? (
-    oci_bastion_session.genai_ssh[0].ssh_metadata != null ? 
-    try(oci_bastion_session.genai_ssh[0].ssh_metadata["command"], "Check OCI Console for SSH connection details") : 
-    "Session created but SSH command not available yet. Check OCI Console for connection details."
+  value = var.enable_bastion_service && var.enable_bastion_sessions ? (
+    length(oci_bastion_session.genai_ssh) > 0 && oci_bastion_session.genai_ssh[0].ssh_metadata != null ? 
+    try(oci_bastion_session.genai_ssh[0].ssh_metadata["command"], 
+        length(oci_bastion_session.ssh_port_forward) > 0 && oci_bastion_session.ssh_port_forward[0].ssh_metadata != null ?
+        "${try(oci_bastion_session.ssh_port_forward[0].ssh_metadata["command"], "Check OCI Console for SSH connection details")} # Port forwarding to SSH" :
+        "Check OCI Console for SSH connection details") : 
+    length(oci_bastion_session.ssh_port_forward) > 0 && oci_bastion_session.ssh_port_forward[0].ssh_metadata != null ?
+    "${try(oci_bastion_session.ssh_port_forward[0].ssh_metadata["command"], "Check OCI Console for connection details")} # Port forwarding to SSH" :
+    "Sessions created but SSH commands not available yet. Check OCI Console for connection details."
   ) : "Direct SSH: ssh -i ~/.ssh/id_rsa opc@${oci_core_instance.genai.public_ip}"
   sensitive = false
 }
@@ -76,15 +90,16 @@ output "database_connection_command" {
   sensitive = false
 }
 
-# Bastion Session IDs for manual connection
+# Enhanced Bastion Session IDs with new sessions
 output "bastion_session_ids" {
   description = "Bastion session IDs for manual connection"
   value = var.enable_bastion_service && var.enable_bastion_sessions ? {
-    ssh_session       = length(oci_bastion_session.genai_ssh) > 0 ? oci_bastion_session.genai_ssh[0].id : null
-    jupyter_session   = length(oci_bastion_session.jupyter_tunnel) > 0 ? oci_bastion_session.jupyter_tunnel[0].id : null
-    streamlit_session = length(oci_bastion_session.streamlit_tunnel) > 0 ? oci_bastion_session.streamlit_tunnel[0].id : null
-    database_session  = length(oci_bastion_session.database_tunnel) > 0 ? oci_bastion_session.database_tunnel[0].id : null
-    dynamic_session   = length(oci_bastion_session.dynamic_tunnel) > 0 ? oci_bastion_session.dynamic_tunnel[0].id : null
+    managed_ssh_session   = length(oci_bastion_session.genai_ssh) > 0 ? oci_bastion_session.genai_ssh[0].id : null
+    ssh_port_forward     = length(oci_bastion_session.ssh_port_forward) > 0 ? oci_bastion_session.ssh_port_forward[0].id : null
+    jupyter_session      = length(oci_bastion_session.jupyter_tunnel) > 0 ? oci_bastion_session.jupyter_tunnel[0].id : null
+    streamlit_session    = length(oci_bastion_session.streamlit_tunnel) > 0 ? oci_bastion_session.streamlit_tunnel[0].id : null
+    database_session     = length(oci_bastion_session.database_tunnel) > 0 ? oci_bastion_session.database_tunnel[0].id : null
+    dynamic_session      = length(oci_bastion_session.dynamic_tunnel) > 0 ? oci_bastion_session.dynamic_tunnel[0].id : null
   } : null
 }
 
@@ -108,11 +123,24 @@ output "deployment_summary" {
     instance_shape      = var.instance_shape
     instance_ocpus      = var.instance_ocpus
     instance_memory_gb  = var.instance_memory_gbs
+    plugin_wait_time    = "10 minutes (Oracle documented maximum)"
   }
 }
 
-# Simple manual connection instructions without heredoc
+# Enhanced manual connection instructions
 output "manual_connection_guide" {
   description = "Manual connection instructions for bastion sessions"
-  value = var.enable_bastion_service ? "Use 'oci bastion session list --bastion-id ${oci_bastion_bastion.genai_bastion[0].id}' to list sessions, then 'oci bastion session get --session-id SESSION_ID' to get connection commands. For port forwarding add: -L 8888:${oci_core_instance.genai.private_ip}:8888 (Jupyter), -L 8501:${oci_core_instance.genai.private_ip}:8501 (Streamlit), -L 1521:${oci_core_instance.genai.private_ip}:1521 (Database)" : "Bastion service not enabled. Use direct IP access."
+  value = var.enable_bastion_service ? "Use 'oci bastion session list --bastion-id ${oci_bastion_bastion.genai_bastion[0].id}' to list sessions, then 'oci bastion session get --session-id SESSION_ID' to get connection commands. MANAGED_SSH sessions require Bastion plugin to be RUNNING (may take up to 10 minutes). PORT_FORWARDING sessions are available immediately. For port forwarding add: -L 8888:${oci_core_instance.genai.private_ip}:8888 (Jupyter), -L 8501:${oci_core_instance.genai.private_ip}:8501 (Streamlit), -L 1521:${oci_core_instance.genai.private_ip}:1521 (Database)" : "Bastion service not enabled. Use direct IP access."
+}
+
+# Troubleshooting information
+output "troubleshooting_info" {
+  description = "Troubleshooting information for bastion access"
+  value = var.enable_bastion_service ? {
+    plugin_check_command = "oci compute-management instance-agent plugin list --instance-agent-id ${oci_core_instance.genai.id}"
+    expected_plugin_status = "RUNNING"
+    wait_time_note = "Bastion plugin can take up to 10 minutes to initialize after instance creation"
+    fallback_access = "Use PORT_FORWARDING sessions for immediate access while waiting for MANAGED_SSH"
+    retry_suggestion = "If MANAGED_SSH fails, wait 5-10 minutes and run 'terraform apply' again"
+  } : null
 }
