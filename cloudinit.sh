@@ -3,15 +3,15 @@
 set -Eeuo pipefail
 
 LOGFILE="/var/log/genai_setup.log"
-exec > >(tee -a "$$LOGFILE") 2>&1
-echo "===== GenAI OneClick: start $$(date -u) ====="
+exec > >(tee -a "$LOGFILE") 2>&1
+echo "===== GenAI OneClick: start $(date -u) ====="
 
 # Template variables from Terraform
 JUPYTER_ENABLE_AUTH="${jupyter_enable_auth}"
 JUPYTER_PASSWORD="${jupyter_password}"
 BASTION_ENABLED="${bastion_enabled}"
 
-# Pass template variables to the environment - FIX 1
+# Pass template variables to the environment
 echo "export JUPYTER_PASSWORD_ENV='${jupyter_password}'" >> /home/opc/.bashrc
 echo "export JUPYTER_ENABLE_AUTH_ENV='${jupyter_enable_auth}'" >> /home/opc/.bashrc
 
@@ -53,7 +53,7 @@ mkdir -p /opt/genai /home/opc/{code,bin,scripts,.venvs,oradata}
 chown -R opc:opc /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts /home/opc/.venvs
 chown -R 54321:54321 /home/opc/oradata || true
 
-# Create password file for Jupyter - FIX 1 continued
+# Create password file for Jupyter
 echo "${jupyter_password}" > /tmp/jupyter_password.txt
 chown opc:opc /tmp/jupyter_password.txt
 
@@ -125,7 +125,7 @@ class LoadProperties:
     def getCompartment(self): return self.compartment_ocid
 LOADPROPS
 
-# FIX 2: Bulletproof Code Download
+# Download sample code repositories
 echo "[STEP] Download sample code repositories"
 CODE_DIR="/home/opc/code"
 mkdir -p "${CODE_DIR}"
@@ -179,8 +179,8 @@ CONFIG
 echo "faq | What are Always Free services?=====Always Free services are part of Oracle Cloud Free Tier." > /opt/genai/txt-docs/faq.txt
 chown -R opc:opc /opt/genai
 
-# Create Jupyter startup script with robust password handling (FIXED for server execution)
-cat > /home/opc/start-jupyter.sh << 'JUPYTER_SCRIPT'
+# Create Jupyter startup script with robust password handling
+cat > /home/opc/start-jupyter.sh << 'JUPYTER_EOF'
 #!/bin/bash
 source ~/.venvs/genai/bin/activate
 export JUPYTER_CONFIG_DIR=/home/opc/.jupyter
@@ -206,7 +206,7 @@ if [ "${JUPYTER_ENABLE_AUTH}" = "true" ] && [ -n "${JUPYTER_PASSWORD}" ]; then
     python3 -c "
 from jupyter_server.auth import passwd
 with open('/home/opc/.jupyter/jupyter_lab_config.py', 'w') as f:
-    f.write(f\"c.ServerApp.password = '{passwd('${JUPYTER_PASSWORD}')}\\n\")
+    f.write(f\"c.ServerApp.password = '{passwd('${JUPYTER_PASSWORD}')}'\\n\")
     f.write('c.ServerApp.allow_remote_access = True\\n')
     f.write('c.ServerApp.ip = \\\"0.0.0.0\\\"\\n')
     f.write('c.ServerApp.port = 8888\\n')
@@ -217,7 +217,7 @@ else
     echo "Starting Jupyter without authentication..."
     jupyter lab --LabApp.token='' --LabApp.password='' --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 fi
-JUPYTER_SCRIPT
+JUPYTER_EOF
 chown opc:opc /home/opc/start-jupyter.sh
 chmod +x /home/opc/start-jupyter.sh
 
@@ -233,7 +233,7 @@ EOF
 
 chmod +x /usr/local/bin/genai-setup.sh
 
-# Database setup script with IMPROVED FREEPDB1 handling
+# Database setup script
 cat > /usr/local/bin/genai-db.sh << 'EOF'
 #!/bin/bash
 set -e
@@ -264,7 +264,7 @@ for i in {1..120}; do
   sleep 10
 done
 
-# Configure database with better FREEPDB1 handling
+# Configure database
 echo "[DB] Configuring database..."
 ${PODMAN} exec -i "${NAME}" bash -c '
 source /home/oracle/.bashrc
@@ -276,123 +276,54 @@ EXIT
 SQL
 ' || true
 
-# Improved FREEPDB1 service registration with retry logic
+# Wait for FREEPDB1 service to be registered
 echo "[DB] Waiting for FREEPDB1 service registration..."
-service_registered=false
-for attempt in {1..5}; do
-  echo "[DB] Registration attempt $attempt/5..."
-  
-  # Force service registration
-  ${PODMAN} exec -i "${NAME}" bash -c '
-  source /home/oracle/.bashrc
-  sqlplus -S / as sysdba << SQL
-  ALTER SYSTEM REGISTER;
-  EXIT
-SQL
-  ' || true
-  
-  # Wait and check
-  sleep 15
-  
+for i in {1..60}; do
   if ${PODMAN} exec "${NAME}" bash -c '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
-    echo "[DB] FREEPDB1 service registered successfully"
-    service_registered=true
+    echo "[DB] FREEPDB1 service registered"
     break
   fi
-  
-  # If not registered, try restarting listener
-  if [ $attempt -lt 5 ]; then
-    echo "[DB] Service not registered, restarting listener..."
-    ${PODMAN} exec "${NAME}" bash -c '. /home/oracle/.bashrc; lsnrctl stop; lsnrctl start' || true
-    sleep 10
-  fi
+  sleep 5
 done
 
-if [ "$service_registered" = "false" ]; then
-  echo "[DB] Warning: FREEPDB1 service registration failed after all attempts"
-fi
-
-# Create vector user with enhanced error handling and retry
+# Create vector user and configure PDB for GenAI workloads
 echo "[DB] Creating vector user and configuring for GenAI..."
-vector_user_created=false
+${PODMAN} exec -i "${NAME}" bash -c '
+source /home/oracle/.bashrc
+sqlplus -S sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba << SQL
+WHENEVER SQLERROR CONTINUE
 
-for attempt in {1..3}; do
-  echo "[DB] Vector user creation attempt $attempt/3..."
-  
-  if ${PODMAN} exec -i "${NAME}" bash -c '
-  source /home/oracle/.bashrc
-  sqlplus -S sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba << SQL
-  WHENEVER SQLERROR CONTINUE
-  
-  -- Create additional tablespaces for GenAI workloads
-  CREATE BIGFILE TABLESPACE tbs2 DATAFILE '"'"'bigtbs_f2.dbf'"'"' SIZE 1G AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL SEGMENT SPACE MANAGEMENT AUTO;
-  CREATE UNDO TABLESPACE undots2 DATAFILE '"'"'undotbs_2a.dbf'"'"' SIZE 1G AUTOEXTEND ON RETENTION GUARANTEE;
-  CREATE TEMPORARY TABLESPACE temp_demo TEMPFILE '"'"'temp02.dbf'"'"' SIZE 1G REUSE AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL UNIFORM SIZE 1M;
-  
-  -- Create vector user with proper permissions for AI workloads
-  CREATE USER vector IDENTIFIED BY "vector" DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;
-  GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE TO vector;
-  GRANT UNLIMITED TABLESPACE TO vector;
-  
-  -- Additional grants for GenAI functionality
-  GRANT CREATE ANY DIRECTORY TO vector;
-  GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO vector;
-  
-  -- Test the connection
-  CONNECT vector/vector@127.0.0.1:1521/FREEPDB1;
-  SELECT '"'"'Vector user created successfully'"'"' as status FROM DUAL;
-  
-  EXIT
+-- Create additional tablespaces for GenAI workloads
+CREATE BIGFILE TABLESPACE tbs2 DATAFILE '"'"'bigtbs_f2.dbf'"'"' SIZE 1G AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL SEGMENT SPACE MANAGEMENT AUTO;
+CREATE UNDO TABLESPACE undots2 DATAFILE '"'"'undotbs_2a.dbf'"'"' SIZE 1G AUTOEXTEND ON RETENTION GUARANTEE;
+CREATE TEMPORARY TABLESPACE temp_demo TEMPFILE '"'"'temp02.dbf'"'"' SIZE 1G REUSE AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL UNIFORM SIZE 1M;
+
+-- Create vector user with proper permissions for AI workloads
+CREATE USER vector IDENTIFIED BY "vector" DEFAULT TABLESPACE tbs2 QUOTA UNLIMITED ON tbs2;
+GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE TO vector;
+GRANT UNLIMITED TABLESPACE TO vector;
+
+-- Additional grants for GenAI functionality
+GRANT CREATE ANY DIRECTORY TO vector;
+GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO vector;
+
+EXIT
 SQL
-  '; then
-    echo "[DB] Vector user created successfully"
-    vector_user_created=true
-    break
-  else
-    echo "[DB] Vector user creation failed, attempt $attempt/3"
-    if [ $attempt -lt 3 ]; then
-      sleep 10
-    fi
-  fi
-done
+' || echo "[DB] Warning: Some database configuration steps may have failed"
 
-if [ "$vector_user_created" = "false" ]; then
-  echo "[DB] Warning: Vector user creation failed after all attempts"
-fi
-
-# Configure CDB-level settings for vector operations (only if not done before)
+# Configure CDB-level settings for vector operations
 echo "[DB] Configuring vector memory settings..."
 ${PODMAN} exec -i "${NAME}" bash -c '
 source /home/oracle/.bashrc
 sqlplus -S / as sysdba << SQL
 WHENEVER SQLERROR CONTINUE
-
--- Check if vector memory is already set
-COLUMN value FORMAT A20
-SELECT value FROM v\$parameter WHERE name = '"'"'vector_memory_size'"'"';
-
--- Only restart if needed
 CREATE PFILE FROM SPFILE;
 ALTER SYSTEM SET vector_memory_size = 512M SCOPE=SPFILE;
 SHUTDOWN IMMEDIATE;
 STARTUP;
-
--- Reopen FREEPDB1 after restart
-ALTER PLUGGABLE DATABASE FREEPDB1 OPEN;
-ALTER PLUGGABLE DATABASE FREEPDB1 SAVE STATE;
-ALTER SYSTEM REGISTER;
-
 EXIT
 SQL
 ' || echo "[DB] Warning: Vector memory configuration may have failed"
-
-# Final verification
-echo "[DB] Final verification..."
-if ${PODMAN} exec "${NAME}" bash -c '. /home/oracle/.bashrc; echo "SELECT USER FROM DUAL;" | sqlplus -S vector/vector@127.0.0.1:1521/FREEPDB1' 2>/dev/null | grep -q VECTOR; then
-  echo "[DB] Vector user verified successfully"
-else
-  echo "[DB] Warning: Vector user verification failed"
-fi
 
 echo "[DB] Database setup complete"
 EOF
@@ -447,7 +378,7 @@ systemctl start genai-setup.service
 # --------------------------------------------------------------------
 # Create bastion helper if enabled
 # --------------------------------------------------------------------
-if [ "$$BASTION_ENABLED" = "true" ]; then
+if [ "$BASTION_ENABLED" = "true" ]; then
   echo "[STEP] Creating bastion helper"
   cat > /home/opc/scripts/bastion-info.sh << 'EOF'
 #!/bin/bash
@@ -462,4 +393,4 @@ EOF
   chown opc:opc /home/opc/scripts/bastion-info.sh
 fi
 
-echo "===== GenAI OneClick: cloud-init complete $$(date -u) ====="
+echo "===== GenAI OneClick: cloud-init complete $(date -u) ====="
