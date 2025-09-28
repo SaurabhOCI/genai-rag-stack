@@ -78,7 +78,7 @@ echo "[PRE] Successfully installed Podman and dependencies"
 # ====================================================================
 # genai-setup.sh (MAIN provisioning) — enhanced for bastion
 # ====================================================================
-cat > /usr/local/bin/genai-setup.sh << 'EOF_GENAI_SETUP'
+cat > /usr/local/bin/genai-setup.sh << 'GENAI_SETUP_SCRIPT'
 #!/bin/bash
 set -uxo pipefail
 
@@ -91,7 +91,7 @@ if [[ -f "$MARKER" ]]; then
 fi
 
 retry() { 
-    local max=${1:-5}; shift; local n=1; 
+    local max=$${1:-5}; shift; local n=1; 
     until "$@"; do 
         rc=$?; 
         [[ $n -ge $max ]] && echo "[RETRY] failed after $n: $*" && return $rc; 
@@ -117,9 +117,14 @@ echo "[STEP] create /opt/genai and /home/opc directories"
 mkdir -p /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts /home/opc/.venvs
 chown -R opc:opc /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts /home/opc/.venvs
 
-echo "[STEP] create bastion helper scripts"
+GENAI_SETUP_SCRIPT
+
+# Add bastion-specific content only if enabled
 if [ "$BASTION_ENABLED" = "true" ]; then
-  cat > /home/opc/scripts/bastion-info.sh << 'EOF_BASTION_INFO'
+cat >> /usr/local/bin/genai-setup.sh << 'BASTION_SECTION'
+
+echo "[STEP] create bastion helper scripts"
+cat > /home/opc/scripts/bastion-info.sh << 'BASTION_INFO_SCRIPT'
 #!/bin/bash
 echo "=== OCI Bastion Service Information ==="
 echo "This instance is deployed in a private subnet with Bastion Service access."
@@ -142,14 +147,19 @@ echo "   Use the database connection command from Terraform outputs"
 echo "   Then connect to: localhost:1521/FREEPDB1"
 echo ""
 echo "For Terraform outputs, run: terraform output"
-EOF_BASTION_INFO
+BASTION_INFO_SCRIPT
 
-  chmod +x /home/opc/scripts/bastion-info.sh
-  chown opc:opc /home/opc/scripts/bastion-info.sh
-  
-  # Add to .bashrc
-  echo "echo 'Run ~/scripts/bastion-info.sh for connection information'" >> /home/opc/.bashrc
+chmod +x /home/opc/scripts/bastion-info.sh
+chown opc:opc /home/opc/scripts/bastion-info.sh
+
+# Add to .bashrc
+echo "echo 'Run ~/scripts/bastion-info.sh for connection information'" >> /home/opc/.bashrc
+
+BASTION_SECTION
 fi
+
+# Continue with the rest of the setup script
+cat >> /usr/local/bin/genai-setup.sh << 'MAIN_SETUP_CONTINUE'
 
 echo "[STEP] create Python virtual environment"
 sudo -u opc bash -c '
@@ -180,7 +190,7 @@ echo 'source ~/.venvs/genai/bin/activate' >> /home/opc/.bashrc
 chown opc:opc /home/opc/.bashrc
 
 echo "[STEP] create Jupyter startup script"
-cat > /home/opc/start-jupyter.sh << 'EOF_JUPYTER'
+cat > /home/opc/start-jupyter.sh << 'JUPYTER_SCRIPT'
 #!/bin/bash
 source ~/.venvs/genai/bin/activate
 export JUPYTER_CONFIG_DIR=/home/opc/.jupyter
@@ -193,9 +203,14 @@ if [ ! -f $JUPYTER_CONFIG_DIR/jupyter_lab_config.py ]; then
     jupyter lab --generate-config
 fi
 
-# Set password if provided
-if [ -n "$JUPYTER_PASSWORD" ] && [ "$JUPYTER_ENABLE_AUTH" = "true" ]; then
-    python3 -c "
+MAIN_SETUP_CONTINUE
+
+# Add Jupyter authentication setup if enabled
+if [ "$JUPYTER_ENABLE_AUTH" = "true" ] && [ -n "$JUPYTER_PASSWORD" ]; then
+cat >> /usr/local/bin/genai-setup.sh << 'JUPYTER_AUTH_SECTION'
+
+# Set password
+python3 -c "
 from jupyter_server.auth import passwd
 import os
 config_file = os.path.expanduser('~/.jupyter/jupyter_lab_config.py')
@@ -207,17 +222,21 @@ with open(config_file, 'a') as f:
     f.write('c.ServerApp.open_browser = False\\n')
 print('Jupyter password configured')
 "
+
+JUPYTER_AUTH_SECTION
 fi
+
+cat >> /usr/local/bin/genai-setup.sh << 'JUPYTER_SCRIPT_END'
 
 # Start Jupyter Lab
 jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
-EOF_JUPYTER
+JUPYTER_SCRIPT
 
 chmod +x /home/opc/start-jupyter.sh
 chown opc:opc /home/opc/start-jupyter.sh
 
 echo "[STEP] create Oracle 23ai Free container service"
-cat > /usr/local/bin/start-oracle23ai.sh << 'EOF_ORACLE'
+cat > /usr/local/bin/start-oracle23ai.sh << 'ORACLE_SCRIPT'
 #!/bin/bash
 set -e
 
@@ -264,12 +283,12 @@ for i in {1..60}; do
 done
 
 echo "Oracle 23ai Free setup complete!"
-EOF_ORACLE
+ORACLE_SCRIPT
 
 chmod +x /usr/local/bin/start-oracle23ai.sh
 
 echo "[STEP] create systemd service for Oracle 23ai"
-cat > /etc/systemd/system/oracle23ai.service << 'EOF_SERVICE'
+cat > /etc/systemd/system/oracle23ai.service << 'ORACLE_SERVICE'
 [Unit]
 Description=Oracle 23ai Free Database Container
 After=network.target
@@ -286,7 +305,7 @@ RestartSec=30
 
 [Install]
 WantedBy=multi-user.target
-EOF_SERVICE
+ORACLE_SERVICE
 
 # Enable and start Oracle service
 systemctl daemon-reload
@@ -301,7 +320,7 @@ mkdir -p notebooks
 cd notebooks
 
 # Create sample notebook
-cat > welcome.ipynb << EOF_NOTEBOOK
+cat > welcome.ipynb << "NOTEBOOK_JSON"
 {
  "cells": [
   {
@@ -354,19 +373,20 @@ cat > welcome.ipynb << EOF_NOTEBOOK
  "nbformat": 4,
  "nbformat_minor": 4
 }
-EOF_NOTEBOOK
+NOTEBOOK_JSON
 '
 
 echo "[STEP] setup complete - creating marker file"
 touch "$MARKER"
 echo "===== GenAI OneClick systemd: completed $(date -u) ====="
 exit 0
-EOF_GENAI_SETUP
+
+JUPYTER_SCRIPT_END
 
 chmod +x /usr/local/bin/genai-setup.sh
 
 echo "[STEP] create systemd service for genai setup"
-cat > /etc/systemd/system/genai-setup.service << 'EOF_SYSTEMD'
+cat > /etc/systemd/system/genai-setup.service << 'SYSTEMD_SERVICE'
 [Unit]
 Description=GenAI Environment Setup
 After=network.target
@@ -382,7 +402,7 @@ TimeoutStartSec=1800
 
 [Install]
 WantedBy=multi-user.target
-EOF_SYSTEMD
+SYSTEMD_SERVICE
 
 # Enable and start the setup service
 systemctl daemon-reload
