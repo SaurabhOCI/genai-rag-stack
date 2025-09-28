@@ -102,6 +102,42 @@ JUPYTER
 chown opc:opc /home/opc/start-jupyter.sh
 chmod +x /home/opc/start-jupyter.sh
 
+echo "[STEP] Download sample code repositories"
+CODE_DIR="/home/opc/code"
+
+# Method 1: Try sparse checkout first
+TMP_DIR=$(mktemp -d)
+if git clone --depth 1 --filter=blob:none --sparse https://github.com/ou-developers/css-navigator.git "$TMP_DIR" 2>/dev/null; then
+    cd "$TMP_DIR"
+    git sparse-checkout init --cone 2>/dev/null || true
+    git sparse-checkout set gen-ai 2>/dev/null || true
+    
+    if [ -d "$TMP_DIR/gen-ai" ] && [ -n "$(ls -A "$TMP_DIR/gen-ai" 2>/dev/null)" ]; then
+        echo "Copying from sparse checkout"
+        cp -r "$TMP_DIR/gen-ai"/* "$CODE_DIR"/ 2>/dev/null || true
+    fi
+fi
+
+# Method 2: Fallback to zip download if sparse checkout failed
+if [ -z "$(ls -A "$CODE_DIR" 2>/dev/null)" ]; then
+    echo "Fallback to zip download"
+    cd /tmp
+    wget -q https://github.com/ou-developers/css-navigator/archive/refs/heads/main.zip -O css-nav.zip 2>/dev/null || \
+    curl -sL https://github.com/ou-developers/css-navigator/archive/refs/heads/main.zip -o css-nav.zip
+    
+    if [ -f css-nav.zip ]; then
+        unzip -q css-nav.zip
+        if [ -d css-navigator-main/gen-ai ]; then
+            cp -r css-navigator-main/gen-ai/* "$CODE_DIR"/ 2>/dev/null || true
+        fi
+        rm -rf css-navigator-main css-nav.zip
+    fi
+fi
+
+# Set proper ownership
+chown -R opc:opc "$CODE_DIR"
+chmod -R a+rX "$CODE_DIR"
+
 # Open firewall ports
 firewall-cmd --zone=public --add-port=8888/tcp --permanent || true
 firewall-cmd --zone=public --add-port=8501/tcp --permanent || true
