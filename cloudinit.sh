@@ -1,11 +1,11 @@
 #!/bin/bash
-# cloudinit.sh — Oracle 23ai Free + GenAI stack bootstrap (compatible versions)
+# cloudinit.sh — Oracle 23ai Free + GenAI stack bootstrap (merged)
 # - Keeps ALL prior provisioning (code/, start_jupyter.sh, OCI CLI, pyenv, etc.)
 # - Installs Podman first so DB unit can run
 # - DB unit runs FIRST; setup unit runs AFTER DB
 # - Robust DB bootstrap: open FREEPDB1, SAVE STATE, wait for listener
 # - Idempotent creation of PDB user vector/vector
-# - FIXED: Compatible package versions for Oracle Linux 8
+# - FIXED: Proper bash syntax escaping
 
 set -Eeuo pipefail
 
@@ -79,7 +79,7 @@ fi
 echo "[PRE] Successfully installed Podman and dependencies"
 
 # ====================================================================
-# genai-setup.sh (MAIN provisioning) — with compatible package versions
+# genai-setup.sh (MAIN provisioning) — kept from your original, with small fixes
 # ====================================================================
 cat >/usr/local/bin/genai-setup.sh <<'SCRIPT'
 #!/bin/bash
@@ -93,7 +93,7 @@ if [[ -f "$MARKER" ]]; then
   exit 0
 fi
 
-retry() { local max=$${1:-5}; shift; local n=1; until "$@"; do rc=$?; [[ $n -ge $max ]] && echo "[RETRY] failed after $n: $*" && return $rc; echo "[RETRY] $n -> retrying in $((n*5))s: $*"; sleep $((n*5)); n=$((n+1)); done; return 0; }
+retry() { local max=${1:-5}; shift; local n=1; until "$@"; do rc=$?; [[ $n -ge $max ]] && echo "[RETRY] failed after $n: $*" && return $rc; echo "[RETRY] $n -> retrying in $((n*5))s: $*"; sleep $((n*5)); n=$((n+1)); done; return 0; }
 
 echo "[STEP] enable ol8_addons, pre-populate metadata, and install base pkgs"
 retry 5 dnf -y install dnf-plugins-core curl
@@ -142,7 +142,7 @@ if ! command -v git   >/dev/null 2>&1; then retry 5 dnf -y install git;   fi
 if ! command -v curl  >/dev/null 2>&1; then retry 5 dnf -y install curl;  fi
 if ! command -v unzip >/dev/null 2>&1; then retry 5 dnf -y install unzip; fi
 
-TMP_DIR="$$(mktemp -d)"
+TMP_DIR="$(mktemp -d)"
 REPO_ZIP="/tmp/cssnav.zip"
 
 # Try sparse checkout
@@ -150,14 +150,14 @@ retry 5 git clone --depth 1 --filter=blob:none --sparse https://github.com/ou-de
 retry 5 git -C "$TMP_DIR" sparse-checkout init --cone || true
 retry 5 git -C "$TMP_DIR" sparse-checkout set gen-ai || true
 
-if [ -d "$TMP_DIR/gen-ai" ] && [ -n "$$(ls -A "$TMP_DIR/gen-ai" 2>/dev/null)" ]; then
+if [ -d "$TMP_DIR/gen-ai" ] && [ -n "$(ls -A "$TMP_DIR/gen-ai" 2>/dev/null)" ]; then
   echo "[STEP] copying from sparse-checkout"
   chmod -R a+rx "$TMP_DIR/gen-ai" || true
   cp -a "$TMP_DIR/gen-ai"/. "$CODE_DIR"/
 else
   echo "[STEP] sparse-checkout empty; falling back to zip"
   retry 5 curl -L -o "$REPO_ZIP" https://codeload.github.com/ou-developers/css-navigator/zip/refs/heads/main
-  TMP_ZIP_DIR="$$(mktemp -d)"
+  TMP_ZIP_DIR="$(mktemp -d)"
   unzip -q -o "$REPO_ZIP" -d "$TMP_ZIP_DIR"
   if [ -d "$TMP_ZIP_DIR/css-navigator-main/gen-ai" ]; then
     chmod -R a+rx "$TMP_ZIP_DIR/css-navigator-main/gen-ai" || true
@@ -174,6 +174,166 @@ rm -rf "$TMP_DIR"
 chown -R opc:opc "$CODE_DIR" || true
 chmod -R a+rX "$CODE_DIR" || true
 ln -sfn "$CODE_DIR" /opt/code || true
+
+echo "[STEP] embed user's init-genailabs.sh (modified to NOT start DB; it waits for it)"
+cat >/opt/genai/init-genailabs.sh <<'USERSCRIPT'
+#!/bin/bash
+set -Eeuo pipefail
+LOGFILE=/var/log/cloud-init-output.log
+exec > >(tee -a $LOGFILE) 2>&1
+
+MARKER_FILE="/home/opc/.init_done"
+if [ -f "$MARKER_FILE" ]; then
+  echo "Init script has already been run. Exiting."
+  exit 0
+fi
+
+echo "===== Starting Cloud-Init User Script ====="
+
+# Expand the boot volume (best-effort)
+sudo /usr/libexec/oci-growfs -y || true
+
+# Ensure build prerequisites (SQLite-from-source path kept)
+sudo dnf config-manager --set-enabled ol8_addons || true
+sudo dnf install -y podman git libffi-devel bzip2-devel ncurses-devel readline-devel wget make gcc zlib-devel openssl-devel || true
+
+# Install latest SQLite from source (kept from original)
+cd /tmp
+wget -q https://www.sqlite.org/2023/sqlite-autoconf-3430000.tar.gz
+tar -xzf sqlite-autoconf-3430000.tar.gz
+cd sqlite-autoconf-3430000
+./configure --prefix=/usr/local
+make -s
+sudo make install
+
+# Verify SQLite
+/usr/local/bin/sqlite3 --version || true
+
+# PATH/LD for SQLite (kept)
+echo 'export PATH="/usr/local/bin:$PATH"' >> /home/opc/.bashrc
+echo 'export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"' >> /home/opc/.bashrc
+echo 'export CFLAGS="-I/usr/local/include"' >> /home/opc/.bashrc
+echo 'export LDFLAGS="-L/usr/local/lib"' >> /home/opc/.bashrc
+source /home/opc/.bashrc
+
+# Persistent oradata
+sudo mkdir -p /home/opc/oradata
+sudo chown -R 54321:54321 /home/opc/oradata
+sudo chmod -R 755 /home/opc/oradata
+
+# Wait for 23ai container to exist, then for FREEPDB1 service
+echo "Waiting for 23ai container to be created..."
+for i in {1..120}; do
+  if /usr/bin/podman ps -a --format '{{.Names}}' | grep -qw 23ai; then
+    echo "23ai container exists."
+    break
+  fi
+  sleep 5
+done
+
+echo "Waiting for FREEPDB1 service to be registered with the listener..."
+for i in {1..180}; do
+  if /usr/bin/podman exec 23ai bash -lc '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
+    echo "FREEPDB1 service is registered."
+    break
+  fi
+  sleep 10
+done
+
+# Quick connection smoke (non-fatal)
+OUTPUT=$(/usr/bin/podman exec 23ai bash -lc 'echo | sqlplus -S -L sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba || true')
+echo "$OUTPUT" | tail -n 2
+
+# PDB config (kept, but guarded)
+echo "Configuring Oracle database in PDB (FREEPDB1)..."
+sudo /usr/bin/podman exec -i 23ai bash -lc '. /home/oracle/.bashrc; sqlplus -S -L "sys:database123@127.0.0.1:1521/FREEPDB1 as sysdba" <<EOSQL
+WHENEVER SQLERROR CONTINUE
+CREATE BIGFILE TABLESPACE tbs2 DATAFILE ''bigtbs_f2.dbf'' SIZE 1G AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL SEGMENT SPACE MANAGEMENT AUTO;
+CREATE UNDO TABLESPACE undots2 DATAFILE ''undotbs_2a.dbf'' SIZE 1G AUTOEXTEND ON RETENTION GUARANTEE;
+CREATE TEMPORARY TABLESPACE temp_demo TEMPFILE ''temp02.dbf'' SIZE 1G REUSE AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL UNIFORM SIZE 1M;
+-- Ensure vector exists with defaults (tbs2), idempotent
+CREATE USER vector IDENTIFIED BY "vector" DEFAULT TABLESPACE tbs2 QUOTA UNLIMITED ON tbs2;
+GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW TO vector;
+EXIT
+EOSQL'
+
+# CDB root tweaks (kept, but non-fatal)
+echo "Switching to CDB root for system-level changes..."
+sudo /usr/bin/podman exec -i 23ai bash -lc '. /home/oracle/.bashrc; sqlplus -S -L / as sysdba <<EOSQL
+WHENEVER SQLERROR CONTINUE
+CREATE PFILE FROM SPFILE;
+ALTER SYSTEM SET vector_memory_size = 512M SCOPE=SPFILE;
+SHUTDOWN IMMEDIATE;
+STARTUP;
+EXIT
+EOSQL'
+
+# pyenv + Python 3.11.9 (kept)
+sudo -u opc -i bash <<'EOF_OPC'
+set -eux
+export HOME=/home/opc
+export PYENV_ROOT="$HOME/.pyenv"
+curl -sS https://pyenv.run | bash
+
+cat << EOF >> $HOME/.bashrc
+export PYENV_ROOT="\$HOME/.pyenv"
+[[ -d "\$PYENV_ROOT/bin" ]] && export PATH="\$PYENV_ROOT/bin:\$PATH"
+eval "\$(pyenv init --path)"
+eval "\$(pyenv init -)"
+eval "\$(pyenv virtualenv-init -)"
+EOF
+
+cat << EOF >> $HOME/.bash_profile
+if [ -f ~/.bashrc ]; then
+   source ~/.bashrc
+fi
+EOF
+
+source $HOME/.bashrc
+export PATH="$PYENV_ROOT/bin:$PATH"
+
+CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib" LD_LIBRARY_PATH="/usr/local/lib" pyenv install -s 3.11.9
+pyenv rehash
+mkdir -p $HOME/labs
+cd $HOME/labs
+pyenv local 3.11.9
+pyenv rehash
+python --version
+export PYTHONPATH=$HOME/.pyenv/versions/3.11.9/lib/python3.11/site-packages:$PYTHONPATH
+
+$HOME/.pyenv/versions/3.11.9/bin/pip install --no-cache-dir oci==2.129.1 oracledb sentence-transformers langchain==0.2.6 langchain-community==0.2.6 langchain-chroma==0.1.2 langchain-core==0.2.11 langchain-text-splitters==0.2.2 langsmith==0.1.83 pypdf==4.2.0 streamlit==1.36.0 python-multipart==0.0.9 chroma-hnswlib==0.7.3 chromadb==0.5.3 torch==2.5.0
+
+python - <<PY
+from sentence_transformers import SentenceTransformer
+SentenceTransformer('all-MiniLM-L12-v2')
+PY
+
+pip install --user jupyterlab
+curl -sSL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh -o install.sh
+chmod +x install.sh
+./install.sh --accept-all-defaults
+echo 'export PATH=$PATH:$HOME/.local/bin' >> $HOME/.bashrc
+source $HOME/.bashrc
+
+REPO_URL="https://github.com/ou-developers/ou-generativeai-pro.git"
+FINAL_DIR="$HOME/labs"
+git init
+git remote add origin $REPO_URL
+git config core.sparseCheckout true
+echo "labs/*" >> .git/info/sparse-checkout
+git pull origin main || true
+mv labs/* . 2>/dev/null || true
+rm -rf .git labs
+echo "Files successfully downloaded to $FINAL_DIR"
+EOF_OPC
+
+touch "$MARKER_FILE"
+echo "===== Cloud-Init User Script Completed Successfully ====="
+exit 0
+USERSCRIPT
+chmod +x /opt/genai/init-genailabs.sh
+cp -f /opt/genai/init-genailabs.sh /home/opc/init-genailabs.sh || true
+chown opc:opc /home/opc/init-genailabs.sh || true
 
 echo "[STEP] install Python 3.9 for OL8 and create venv with COMPATIBLE packages"
 retry 5 dnf -y module enable python39 || true
@@ -205,185 +365,8 @@ pip install --no-cache-dir \
 echo "Compatible Python packages installed successfully"
 '
 
-echo "[STEP] embed user's init-genailabs.sh (with pyenv for advanced packages)"
-cat >/opt/genai/init-genailabs.sh <<'USERSCRIPT'
-#!/bin/bash
-set -Eeuo pipefail
-LOGFILE=/var/log/cloud-init-output.log
-exec > >(tee -a $LOGFILE) 2>&1
-
-MARKER_FILE="/home/opc/.init_done"
-if [ -f "$MARKER_FILE" ]; then
-  echo "Init script has already been run. Exiting."
-  exit 0
-fi
-
-echo "===== Starting Cloud-Init User Script ====="
-
-# Expand the boot volume (best-effort)
-sudo /usr/libexec/oci-growfs -y || true
-
-# Ensure build prerequisites
-sudo dnf config-manager --set-enabled ol8_addons || true
-sudo dnf install -y podman git libffi-devel bzip2-devel ncurses-devel readline-devel wget make gcc zlib-devel openssl-devel || true
-
-# Install latest SQLite from source
-cd /tmp
-wget -q https://www.sqlite.org/2023/sqlite-autoconf-3430000.tar.gz
-tar -xzf sqlite-autoconf-3430000.tar.gz
-cd sqlite-autoconf-3430000
-./configure --prefix=/usr/local
-make -s
-sudo make install
-
-# Verify SQLite
-/usr/local/bin/sqlite3 --version || true
-
-# PATH/LD for SQLite
-echo 'export PATH="/usr/local/bin:$PATH"' >> /home/opc/.bashrc
-echo 'export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"' >> /home/opc/.bashrc
-echo 'export CFLAGS="-I/usr/local/include"' >> /home/opc/.bashrc
-echo 'export LDFLAGS="-L/usr/local/lib"' >> /home/opc/.bashrc
-source /home/opc/.bashrc
-
-# Persistent oradata
-sudo mkdir -p /home/opc/oradata
-sudo chown -R 54321:54321 /home/opc/oradata
-sudo chmod -R 755 /home/opc/oradata
-
-# Wait for 23ai container to exist and be ready
-echo "Waiting for 23ai container to be created..."
-for i in {1..120}; do
-  if /usr/bin/podman ps -a --format '{{.Names}}' | grep -qw 23ai; then
-    echo "23ai container exists."
-    break
-  fi
-  sleep 5
-done
-
-echo "Waiting for FREEPDB1 service to be registered with the listener..."
-for i in {1..180}; do
-  if /usr/bin/podman exec 23ai bash -lc '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
-    echo "FREEPDB1 service is registered."
-    break
-  fi
-  sleep 10
-done
-
-# Quick connection smoke test
-OUTPUT=$$(/usr/bin/podman exec 23ai bash -lc 'echo | sqlplus -S -L sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba || true')
-echo "$OUTPUT" | tail -n 2
-
-# Enhanced PDB configuration
-echo "Configuring Oracle database in PDB (FREEPDB1)..."
-sudo /usr/bin/podman exec -i 23ai bash -lc '. /home/oracle/.bashrc; sqlplus -S -L "sys:database123@127.0.0.1:1521/FREEPDB1 as sysdba" <<EOSQL
-WHENEVER SQLERROR CONTINUE
-CREATE BIGFILE TABLESPACE tbs2 DATAFILE ''bigtbs_f2.dbf'' SIZE 1G AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL SEGMENT SPACE MANAGEMENT AUTO;
-CREATE UNDO TABLESPACE undots2 DATAFILE ''undotbs_2a.dbf'' SIZE 1G AUTOEXTEND ON RETENTION GUARANTEE;
-CREATE TEMPORARY TABLESPACE temp_demo TEMPFILE ''temp02.dbf'' SIZE 1G REUSE AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL UNIFORM SIZE 1M;
--- Ensure vector user exists with enhanced permissions
-CREATE USER vector IDENTIFIED BY "vector" DEFAULT TABLESPACE tbs2 QUOTA UNLIMITED ON tbs2;
-GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE TO vector;
-GRANT UNLIMITED TABLESPACE TO vector;
--- Enable AI Vector Search capabilities
-ALTER USER vector QUOTA UNLIMITED ON tbs2;
-EXIT
-EOSQL'
-
-# pyenv + Python 3.11.9 setup for advanced packages
-sudo -u opc -i bash <<'EOF_OPC'
-set -eux
-export HOME=/home/opc
-export PYENV_ROOT="$HOME/.pyenv"
-
-# Install pyenv with error handling
-curl -sS https://pyenv.run | bash || true
-
-cat << EOF >> $HOME/.bashrc
-export PYENV_ROOT="\$HOME/.pyenv"
-[[ -d "\$PYENV_ROOT/bin" ]] && export PATH="\$PYENV_ROOT/bin:\$PATH"
-eval "\$(pyenv init --path)"
-eval "\$(pyenv init -)"
-eval "\$(pyenv virtualenv-init -)"
-EOF
-
-cat << EOF >> $HOME/.bash_profile
-if [ -f ~/.bashrc ]; then
-   source ~/.bashrc
-fi
-EOF
-
-source $HOME/.bashrc
-export PATH="$PYENV_ROOT/bin:$PATH"
-
-# Install Python 3.11.9 with proper flags
-CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib" LD_LIBRARY_PATH="/usr/local/lib" pyenv install -s 3.11.9 || true
-pyenv rehash || true
-mkdir -p $HOME/labs
-cd $HOME/labs
-pyenv local 3.11.9 || true
-pyenv rehash || true
-python --version || true
-
-# Install advanced packages in pyenv environment
-$HOME/.pyenv/versions/3.11.9/bin/pip install --no-cache-dir \
-  oci \
-  oracledb \
-  sentence-transformers \
-  "langchain>=0.2.0,<0.3.0" \
-  langchain-community \
-  "pypdf>=4.0.0" \
-  "streamlit>=1.30.0" \
-  python-multipart \
-  chromadb \
-  "torch>=2.0.0" || echo "Some advanced packages may have failed to install"
-
-# Pre-download models (best effort)
-python - <<PY || echo "Model download failed, will be downloaded on first use"
-try:
-    from sentence_transformers import SentenceTransformer
-    print("Downloading embedding model...")
-    SentenceTransformer('all-MiniLM-L12-v2')
-    print("Model download complete.")
-except Exception as e:
-    print(f"Model download failed: {e}")
-PY
-
-# Install Jupyter in pyenv environment
-pip install --user jupyterlab || true
-
-# Install OCI CLI
-curl -sSL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh -o install.sh
-chmod +x install.sh
-./install.sh --accept-all-defaults || true
-echo 'export PATH=$PATH:$HOME/.local/bin' >> $HOME/.bashrc
-source $HOME/.bashrc
-
-# Download sample repositories
-REPO_URL="https://github.com/ou-developers/ou-generativeai-pro.git"
-FINAL_DIR="$HOME/labs"
-git init
-git remote add origin $REPO_URL
-git config core.sparseCheckout true
-echo "labs/*" >> .git/info/sparse-checkout
-git pull origin main || true
-mv labs/* . 2>/dev/null || true
-rm -rf .git labs || true
-echo "Files successfully downloaded to $FINAL_DIR"
-EOF_OPC
-
-touch "$MARKER_FILE"
-echo "===== Enhanced Cloud-Init User Script Completed Successfully ====="
-exit 0
-USERSCRIPT
-
-chmod +x /opt/genai/init-genailabs.sh
-cp -f /opt/genai/init-genailabs.sh /home/opc/init-genailabs.sh || true
-chown opc:opc /home/opc/init-genailabs.sh || true
-
 echo "[STEP] install OCI CLI to ~/bin/oci and make PATH global"
 sudo -u opc bash -lc 'retry 5 curl -sSL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh -o /tmp/oci-install.sh; retry 5 bash /tmp/oci-install.sh --accept-all-defaults --exec-dir $HOME/bin --install-dir $HOME/lib/oci-cli --update-path false; grep -q "export PATH=$HOME/bin" $HOME/.bashrc || echo "export PATH=$HOME/bin:$PATH" >> $HOME/.bashrc'
-
 cat >/etc/profile.d/genai-path.sh <<'PROF'
 export PATH=/home/opc/bin:$PATH
 PROF
@@ -404,11 +387,9 @@ class LoadProperties:
     def getEndpoint(self): return self.endpoint
     def getCompartment(self): return self.compartment_ocid
 PY
-
 cat >/opt/genai/config.txt <<'CFG'
 {"model_name":"cohere.command-r-16k","embedding_model_name":"cohere.embed-english-v3.0","endpoint":"https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com","compartment_ocid":"ocid1.compartment.oc1....replace_me..."}
 CFG
-
 mkdir -p /opt/genai/txt-docs /opt/genai/pdf-docs
 echo "faq | What are Always Free services?=====Always Free services are part of Oracle Cloud Free Tier." >/opt/genai/txt-docs/faq.txt
 chown -R opc:opc /opt/genai
@@ -424,13 +405,13 @@ chown opc:opc /home/opc/start_jupyter.sh
 chmod +x /home/opc/start_jupyter.sh
 
 echo "[STEP] open firewall ports"
-for p in 8888 8501 1521; do firewall-cmd --zone=public --add-port=$${p}/tcp --permanent || true; done
+for p in 8888 8501 1521; do firewall-cmd --zone=public --add-port=${p}/tcp --permanent || true; done
 firewall-cmd --reload || true
 
 echo "[STEP] run user's init-genailabs.sh (non-fatal)"
 set +e
 bash /opt/genai/init-genailabs.sh
-USR_RC=$$?
+USR_RC=$?
 set -e
 echo "[STEP] user init script exit code: $USR_RC"
 
@@ -440,7 +421,7 @@ SCRIPT
 chmod +x /usr/local/bin/genai-setup.sh
 
 # ====================================================================
-# genai-db.sh (DB container) — robust bootstrap for 23ai
+# genai-db.sh (DB container) — FIXED retry function
 # ====================================================================
 cat >/usr/local/bin/genai-db.sh <<'DBSCR'
 #!/bin/bash
@@ -448,10 +429,22 @@ set -Eeuo pipefail
 
 PODMAN="/usr/bin/podman"
 log(){ echo "[DB] $*"; }
-retry() { local t=$${1:-5}; shift; local n=1; until "$@"; do local rc=$$?;
-  if (( n>=t )); then return "$$rc"; fi
-  log "retry $$n/$$t (rc=$$rc): $$*"; sleep $$((n*5)); ((n++));
-done; }
+
+# Fixed retry function with proper bash syntax
+retry() { 
+    local t=${1:-5}; 
+    shift; 
+    local n=1; 
+    until "$@"; do 
+        local rc=$?;
+        if [ $n -ge $t ]; then 
+            return "$rc"; 
+        fi
+        log "retry $n/$t (rc=$rc): $*"; 
+        sleep $((n*5)); 
+        n=$((n+1));
+    done; 
+}
 
 ORACLE_PWD="database123"
 ORACLE_PDB="FREEPDB1"
@@ -459,30 +452,30 @@ ORADATA_DIR="/home/opc/oradata"
 IMAGE="container-registry.oracle.com/database/free:latest"
 NAME="23ai"
 
-log "start $$(date -u)"
-mkdir -p "$$ORADATA_DIR" && chown -R 54321:54321 "$$ORADATA_DIR" || true
+log "start $(date -u)"
+mkdir -p "$ORADATA_DIR" && chown -R 54321:54321 "$ORADATA_DIR" || true
 
-retry 5 "$$PODMAN" pull "$$IMAGE" || true
-"$$PODMAN" rm -f "$$NAME" || true
+retry 5 "$PODMAN" pull "$IMAGE" || true
+"$PODMAN" rm -f "$NAME" || true
 
-retry 5 "$$PODMAN" run -d --name "$$NAME" --network=host \
-  -e ORACLE_PWD="$$ORACLE_PWD" \
-  -e ORACLE_PDB="$$ORACLE_PDB" \
+retry 5 "$PODMAN" run -d --name "$NAME" --network=host \
+  -e ORACLE_PWD="$ORACLE_PWD" \
+  -e ORACLE_PDB="$ORACLE_PDB" \
   -e ORACLE_MEMORY='2048' \
-  -v "$$ORADATA_DIR":/opt/oracle/oradata:z \
-  "$$IMAGE"
+  -v "$ORADATA_DIR":/opt/oracle/oradata:z \
+  "$IMAGE"
 
 log "waiting for 'DATABASE IS READY TO USE!'"
 for i in {1..144}; do
-  "$$PODMAN" logs "$$NAME" 2>&1 | grep -q 'DATABASE IS READY TO USE!' && break
+  "$PODMAN" logs "$NAME" 2>&1 | grep -q 'DATABASE IS READY TO USE!' && break
   sleep 5
 done
 
 log "opening PDB and saving state..."
-"$$PODMAN" exec -e ORACLE_PWD="$$ORACLE_PWD" -i "$$NAME" bash -lc '
+"$PODMAN" exec -e ORACLE_PWD="$ORACLE_PWD" -i "$NAME" bash -lc '
   . /home/oracle/.bashrc
   sqlplus -S -L /nolog <<SQL
-  CONNECT sys/$${ORACLE_PWD}@127.0.0.1:1521/FREE AS SYSDBA
+  CONNECT sys/${ORACLE_PWD}@127.0.0.1:1521/FREE AS SYSDBA
   WHENEVER SQLERROR EXIT SQL.SQLCODE
   ALTER PLUGGABLE DATABASE FREEPDB1 OPEN;
   ALTER PLUGGABLE DATABASE FREEPDB1 SAVE STATE;
@@ -493,16 +486,16 @@ SQL
 
 log "waiting for listener to publish FREEPDB1..."
 for i in {1..60}; do
-  "$$PODMAN" exec -i "$$NAME" bash -lc '. /home/oracle/.bashrc; lsnrctl status' \
+  "$PODMAN" exec -i "$NAME" bash -lc '. /home/oracle/.bashrc; lsnrctl status' \
     | grep -qi 'Service "FREEPDB1"' && { log "FREEPDB1 registered"; break; }
   sleep 3
 done
 
 log "creating PDB user 'vector' (idempotent)"
-"$$PODMAN" exec -e ORACLE_PWD="$$ORACLE_PWD" -i "$$NAME" bash -lc '
+"$PODMAN" exec -e ORACLE_PWD="$ORACLE_PWD" -i "$NAME" bash -lc '
   . /home/oracle/.bashrc
   sqlplus -S -L /nolog <<SQL
-  CONNECT sys/$${ORACLE_PWD}@127.0.0.1:1521/FREEPDB1 AS SYSDBA
+  CONNECT sys/${ORACLE_PWD}@127.0.0.1:1521/FREEPDB1 AS SYSDBA
   SET DEFINE OFF
   WHENEVER SQLERROR CONTINUE
   CREATE USER vector IDENTIFIED BY "vector";
@@ -512,7 +505,7 @@ log "creating PDB user 'vector' (idempotent)"
 SQL
 ' || log "WARN: vector user create step returned non-zero"
 
-log "done $$(date -u)"
+log "done $(date -u)"
 DBSCR
 chmod +x /usr/local/bin/genai-db.sh
 
