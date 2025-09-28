@@ -60,25 +60,19 @@ output "ssh_connection_command" {
 
 output "jupyter_connection_command" {
   description = "Jupyter Lab connection command"
-  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.jupyter_tunnel) > 0 ? 
-    "Jupyter tunnel created. Use: oci bastion session get --session-id ${oci_bastion_session.jupyter_tunnel[0].id} to get connection command, then access http://localhost:8888" : 
-    "Direct access: http://${oci_core_instance.genai.public_ip}:8888"
+  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.jupyter_tunnel) > 0 ? "Jupyter tunnel created. Use: oci bastion session get --session-id ${oci_bastion_session.jupyter_tunnel[0].id} to get connection command, then access http://localhost:8888" : "Direct access: http://${oci_core_instance.genai.public_ip}:8888"
   sensitive = false
 }
 
 output "streamlit_connection_command" {
   description = "Streamlit connection command"
-  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.streamlit_tunnel) > 0 ? 
-    "Streamlit tunnel created. Use: oci bastion session get --session-id ${oci_bastion_session.streamlit_tunnel[0].id} to get connection command, then access http://localhost:8501" : 
-    "Direct access: http://${oci_core_instance.genai.public_ip}:8501"
+  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.streamlit_tunnel) > 0 ? "Streamlit tunnel created. Use: oci bastion session get --session-id ${oci_bastion_session.streamlit_tunnel[0].id} to get connection command, then access http://localhost:8501" : "Direct access: http://${oci_core_instance.genai.public_ip}:8501"
   sensitive = false
 }
 
 output "database_connection_command" {
   description = "Oracle database connection command"
-  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.database_tunnel) > 0 ? 
-    "Database tunnel created. Use: oci bastion session get --session-id ${oci_bastion_session.database_tunnel[0].id} to get connection command, then connect to localhost:1521/FREEPDB1" : 
-    "Direct connection: ${oci_core_instance.genai.public_ip}:1521/FREEPDB1"
+  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.database_tunnel) > 0 ? "Database tunnel created. Use: oci bastion session get --session-id ${oci_bastion_session.database_tunnel[0].id} to get connection command, then connect to localhost:1521/FREEPDB1" : "Direct connection: ${oci_core_instance.genai.public_ip}:1521/FREEPDB1"
   sensitive = false
 }
 
