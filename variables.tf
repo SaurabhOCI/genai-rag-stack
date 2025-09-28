@@ -95,6 +95,12 @@ variable "project_compartment_ocid" {
   default     = ""
 }
 
+variable "enable_managed_ssh" {
+  description = "Enable MANAGED_SSH sessions (requires Bastion plugin to be RUNNING)"
+  type        = bool
+  default     = false  # Disabled by default to avoid timing issues
+}
+
 variable "compartment_name" {
   description = "Project compartment name."
   type        = string
