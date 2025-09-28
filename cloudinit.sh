@@ -78,7 +78,7 @@ echo "[PRE] Successfully installed Podman and dependencies"
 # ====================================================================
 # genai-setup.sh (MAIN provisioning) — enhanced for bastion
 # ====================================================================
-cat >/usr/local/bin/genai-setup.sh <<'SCRIPT'
+cat > /usr/local/bin/genai-setup.sh << 'EOF_GENAI_SETUP'
 #!/bin/bash
 set -uxo pipefail
 
@@ -90,7 +90,17 @@ if [[ -f "$MARKER" ]]; then
   exit 0
 fi
 
-retry() { local max=$${1:-5}; shift; local n=1; until "$@"; do rc=$?; [[ $n -ge $max ]] && echo "[RETRY] failed after $n: $*" && return $rc; echo "[RETRY] $n -> retrying in $((n*5))s: $*"; sleep $((n*5)); n=$((n+1)); done; return 0; }
+retry() { 
+    local max=${1:-5}; shift; local n=1; 
+    until "$@"; do 
+        rc=$?; 
+        [[ $n -ge $max ]] && echo "[RETRY] failed after $n: $*" && return $rc; 
+        echo "[RETRY] $n -> retrying in $((n*5))s: $*"; 
+        sleep $((n*5)); 
+        n=$((n+1)); 
+    done; 
+    return 0; 
+}
 
 echo "[STEP] enable ol8_addons, pre-populate metadata, and install base pkgs"
 retry 5 dnf -y install dnf-plugins-core curl
@@ -98,18 +108,18 @@ retry 5 dnf config-manager --set-enabled ol8_addons || true
 retry 5 dnf -y makecache --refresh
 retry 5 dnf -y install \
   git unzip jq tar make gcc gcc-c++ bzip2 bzip2-devel zlib-devel openssl-devel readline-devel libffi-devel \
-  wget curl which xz python3 python3-pip podman firewalld
+  wget curl which xz python3 python3-pip python39 python39-pip podman firewalld
 
 echo "[STEP] enable firewalld"
 systemctl enable --now firewalld || true
 
 echo "[STEP] create /opt/genai and /home/opc directories"
-mkdir -p /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts
-chown -R opc:opc /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts
+mkdir -p /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts /home/opc/.venvs
+chown -R opc:opc /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts /home/opc/.venvs
 
 echo "[STEP] create bastion helper scripts"
 if [ "$BASTION_ENABLED" = "true" ]; then
-  cat > /home/opc/scripts/bastion-info.sh <<'BASTION_INFO'
+  cat > /home/opc/scripts/bastion-info.sh << 'EOF_BASTION_INFO'
 #!/bin/bash
 echo "=== OCI Bastion Service Information ==="
 echo "This instance is deployed in a private subnet with Bastion Service access."
@@ -132,7 +142,7 @@ echo "   Use the database connection command from Terraform outputs"
 echo "   Then connect to: localhost:1521/FREEPDB1"
 echo ""
 echo "For Terraform outputs, run: terraform output"
-BASTION_INFO
+EOF_BASTION_INFO
 
   chmod +x /home/opc/scripts/bastion-info.sh
   chown opc:opc /home/opc/scripts/bastion-info.sh
@@ -141,233 +151,243 @@ BASTION_INFO
   echo "echo 'Run ~/scripts/bastion-info.sh for connection information'" >> /home/opc/.bashrc
 fi
 
-echo "[STEP] fetch code repository"
-CODE_DIR="/home/opc/code"
-mkdir -p "$CODE_DIR"
-
-# preflight
-if ! command -v git   >/dev/null 2>&1; then retry 5 dnf -y install git;   fi
-if ! command -v curl  >/dev/null 2>&1; then retry 5 dnf -y install curl;  fi
-if ! command -v unzip >/dev/null 2>&1; then retry 5 dnf -y install unzip; fi
-
-TMP_DIR="$$(mktemp -d)"
-REPO_ZIP="/tmp/cssnav.zip"
-
-# Try sparse checkout
-retry 5 git clone --depth 1 --filter=blob:none --sparse https://github.com/ou-developers/css-navigator.git "$TMP_DIR" || true
-retry 5 git -C "$TMP_DIR" sparse-checkout init --cone || true
-retry 5 git -C "$TMP_DIR" sparse-checkout set gen-ai || true
-
-if [ -d "$TMP_DIR/gen-ai" ] && [ -n "$$(ls -A "$TMP_DIR/gen-ai" 2>/dev/null)" ]; then
-  echo "[STEP] copying from sparse-checkout"
-  chmod -R a+rx "$TMP_DIR/gen-ai" || true
-  cp -a "$TMP_DIR/gen-ai"/. "$CODE_DIR"/
-else
-  echo "[STEP] sparse-checkout empty; falling back to zip"
-  retry 5 curl -L -o "$REPO_ZIP" https://codeload.github.com/ou-developers/css-navigator/zip/refs/heads/main
-  TMP_ZIP_DIR="$$(mktemp -d)"
-  unzip -q -o "$REPO_ZIP" -d "$TMP_ZIP_DIR"
-  if [ -d "$TMP_ZIP_DIR/css-navigator-main/gen-ai" ]; then
-    chmod -R a+rx "$TMP_ZIP_DIR/css-navigator-main/gen-ai" || true
-    cp -a "$TMP_ZIP_DIR/css-navigator-main/gen-ai"/. "$CODE_DIR"/
-  else
-    echo "[WARN] gen-ai folder not found in zip"
-  fi
-  rm -rf "$TMP_ZIP_DIR" "$REPO_ZIP"
-fi
-
-rm -rf "$TMP_DIR"
-
-# ownership and a backward-compat symlink
-chown -R opc:opc "$CODE_DIR" || true
-chmod -R a+rX "$CODE_DIR" || true
-ln -sfn "$CODE_DIR" /opt/code || true
-
-echo "[STEP] embed enhanced init-genailabs.sh"
-cat >/opt/genai/init-genailabs.sh <<'USERSCRIPT'
-#!/bin/bash
-set -Eeuo pipefail
-LOGFILE=/var/log/cloud-init-output.log
-exec > >(tee -a $LOGFILE) 2>&1
-
-MARKER_FILE="/home/opc/.init_done"
-if [ -f "$MARKER_FILE" ]; then
-  echo "Init script has already been run. Exiting."
-  exit 0
-fi
-
-echo "===== Starting Enhanced Cloud-Init User Script ====="
-
-# Expand the boot volume (best-effort)
-sudo /usr/libexec/oci-growfs -y || true
-
-# Ensure build prerequisites
-sudo dnf config-manager --set-enabled ol8_addons || true
-sudo dnf install -y podman git libffi-devel bzip2-devel ncurses-devel readline-devel wget make gcc zlib-devel openssl-devel || true
-
-# Install latest SQLite from source
-cd /tmp
-wget -q https://www.sqlite.org/2023/sqlite-autoconf-3430000.tar.gz
-tar -xzf sqlite-autoconf-3430000.tar.gz
-cd sqlite-autoconf-3430000
-./configure --prefix=/usr/local
-make -s
-sudo make install
-
-# Verify SQLite
-/usr/local/bin/sqlite3 --version || true
-
-# PATH/LD for SQLite
-echo 'export PATH="/usr/local/bin:$PATH"' >> /home/opc/.bashrc
-echo 'export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"' >> /home/opc/.bashrc
-echo 'export CFLAGS="-I/usr/local/include"' >> /home/opc/.bashrc
-echo 'export LDFLAGS="-L/usr/local/lib"' >> /home/opc/.bashrc
-source /home/opc/.bashrc
-
-# Persistent oradata
-sudo mkdir -p /home/opc/oradata
-sudo chown -R 54321:54321 /home/opc/oradata
-sudo chmod -R 755 /home/opc/oradata
-
-# Wait for 23ai container to exist and be ready
-echo "Waiting for 23ai container to be created..."
-for i in {1..120}; do
-  if /usr/bin/podman ps -a --format '{{.Names}}' | grep -qw 23ai; then
-    echo "23ai container exists."
-    break
-  fi
-  sleep 5
-done
-
-echo "Waiting for FREEPDB1 service to be registered with the listener..."
-for i in {1..180}; do
-  if /usr/bin/podman exec 23ai bash -lc '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
-    echo "FREEPDB1 service is registered."
-    break
-  fi
-  sleep 10
-done
-
-# Quick connection smoke test
-OUTPUT=$$(/usr/bin/podman exec 23ai bash -lc 'echo | sqlplus -S -L sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba || true')
-echo "$OUTPUT" | tail -n 2
-
-# Enhanced PDB configuration
-echo "Configuring Oracle database in PDB (FREEPDB1)..."
-sudo /usr/bin/podman exec -i 23ai bash -lc '. /home/oracle/.bashrc; sqlplus -S -L "sys:database123@127.0.0.1:1521/FREEPDB1 as sysdba" <<EOSQL
-WHENEVER SQLERROR CONTINUE
-CREATE BIGFILE TABLESPACE tbs2 DATAFILE ''bigtbs_f2.dbf'' SIZE 1G AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL SEGMENT SPACE MANAGEMENT AUTO;
-CREATE UNDO TABLESPACE undots2 DATAFILE ''undotbs_2a.dbf'' SIZE 1G AUTOEXTEND ON RETENTION GUARANTEE;
-CREATE TEMPORARY TABLESPACE temp_demo TEMPFILE ''temp02.dbf'' SIZE 1G REUSE AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL UNIFORM SIZE 1M;
--- Ensure vector user exists with enhanced permissions
-CREATE USER vector IDENTIFIED BY "vector" DEFAULT TABLESPACE tbs2 QUOTA UNLIMITED ON tbs2;
-GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE TO vector;
-GRANT UNLIMITED TABLESPACE TO vector;
--- Enable AI Vector Search capabilities
-ALTER USER vector QUOTA UNLIMITED ON tbs2;
-EXIT
-EOSQL'
-
-# Enhanced pyenv + Python 3.11.9 setup
-sudo -u opc -i bash <<'EOF_OPC'
-set -eux
+echo "[STEP] create Python virtual environment"
+sudo -u opc bash -c '
 export HOME=/home/opc
-export PYENV_ROOT="$HOME/.pyenv"
-curl -sS https://pyenv.run | bash
+python3 -m venv $HOME/.venvs/genai
+source $HOME/.venvs/genai/bin/activate
+pip install --upgrade pip wheel setuptools
 
-cat << EOF >> $HOME/.bashrc
-export PYENV_ROOT="\$HOME/.pyenv"
-[[ -d "\$PYENV_ROOT/bin" ]] && export PATH="\$PYENV_ROOT/bin:\$PATH"
-eval "\$(pyenv init --path)"
-eval "\$(pyenv init -)"
-eval "\$(pyenv virtualenv-init -)"
-EOF
-
-cat << EOF >> $HOME/.bash_profile
-if [ -f ~/.bashrc ]; then
-   source ~/.bashrc
-fi
-EOF
-
-source $HOME/.bashrc
-export PATH="$PYENV_ROOT/bin:$PATH"
-
-CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib" LD_LIBRARY_PATH="/usr/local/lib" pyenv install -s 3.11.9
-pyenv rehash
-mkdir -p $HOME/labs
-cd $HOME/labs
-pyenv local 3.11.9
-pyenv rehash
-python --version
-
-# Enhanced Python package installation
-$HOME/.pyenv/versions/3.11.9/bin/pip install --no-cache-dir \
-  oci==2.129.1 \
-  oracledb \
-  sentence-transformers \
-  langchain==0.2.6 \
-  langchain-community==0.2.6 \
-  langchain-chroma==0.1.2 \
-  langchain-core==0.2.11 \
-  langchain-text-splitters==0.2.2 \
-  langsmith==0.1.83 \
-  pypdf==4.2.0 \
-  streamlit==1.36.0 \
-  python-multipart==0.0.9 \
-  chroma-hnswlib==0.7.3 \
-  chromadb==0.5.3 \
-  torch==2.5.0 \
-  gradio \
-  fastapi \
-  uvicorn
-
-# Pre-download models
-python - <<PY
-from sentence_transformers import SentenceTransformer
-print("Downloading embedding model...")
-SentenceTransformer('all-MiniLM-L12-v2')
-print("Model download complete.")
-PY
-
-pip install --user jupyterlab
-curl -sSL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh -o install.sh
-chmod +x install.sh
-./install.sh --accept-all-defaults
-echo 'export PATH=$PATH:$HOME/.local/bin' >> $HOME/.bashrc
-source $HOME/.bashrc
-
-# Enhanced repository setup
-REPO_URL="https://github.com/ou-developers/ou-generativeai-pro.git"
-FINAL_DIR="$HOME/labs"
-git init
-git remote add origin $REPO_URL
-git config core.sparseCheckout true
-echo "labs/*" >> .git/info/sparse-checkout
-git pull origin main || true
-mv labs/* . 2>/dev/null || true
-rm -rf .git labs
-echo "Files successfully downloaded to $FINAL_DIR"
-EOF_OPC
-
-touch "$MARKER_FILE"
-echo "===== Enhanced Cloud-Init User Script Completed Successfully ====="
-exit 0
-USERSCRIPT
-chmod +x /opt/genai/init-genailabs.sh
-cp -f /opt/genai/init-genailabs.sh /home/opc/init-genailabs.sh || true
-chown opc:opc /home/opc/init-genailabs.sh || true
-
-echo "[STEP] install Python 3.9 for OL8 and create enhanced venv"
-retry 5 dnf -y module enable python39 || true
-retry 5 dnf -y install python39 python39-pip
-sudo -u opc bash -lc 'python3.9 -m venv $$HOME/.venvs/genai || true; echo "source $$HOME/.venvs/genai/bin/activate" >> $$HOME/.bashrc; source $$HOME/.venvs/genai/bin/activate; python -m pip install --upgrade pip wheel setuptools'
-
-echo "[STEP] install enhanced Python libraries"
-sudo -u opc bash -lc 'source $$HOME/.venvs/genai/bin/activate; pip install --no-cache-dir \
+# Install essential packages
+pip install \
   jupyterlab==4.2.5 \
+  notebook \
+  ipython \
   streamlit==1.36.0 \
-  oracledb \
-  sentence-transformers \
-  langchain==0.2.6 \
-  langchain-community==0.2.6 \
-  langchain-core==0.2.11
+  pandas \
+  numpy \
+  matplotlib \
+  seaborn \
+  requests \
+  python-dotenv \
+  oracledb
+
+echo "Virtual environment created successfully"
+'
+
+echo "[STEP] add venv activation to .bashrc"
+echo 'source ~/.venvs/genai/bin/activate' >> /home/opc/.bashrc
+chown opc:opc /home/opc/.bashrc
+
+echo "[STEP] create Jupyter startup script"
+cat > /home/opc/start-jupyter.sh << 'EOF_JUPYTER'
+#!/bin/bash
+source ~/.venvs/genai/bin/activate
+export JUPYTER_CONFIG_DIR=/home/opc/.jupyter
+
+# Create jupyter config directory
+mkdir -p $JUPYTER_CONFIG_DIR
+
+# Generate Jupyter config if it doesn't exist
+if [ ! -f $JUPYTER_CONFIG_DIR/jupyter_lab_config.py ]; then
+    jupyter lab --generate-config
+fi
+
+# Set password if provided
+if [ -n "$JUPYTER_PASSWORD" ] && [ "$JUPYTER_ENABLE_AUTH" = "true" ]; then
+    python3 -c "
+from jupyter_server.auth import passwd
+import os
+config_file = os.path.expanduser('~/.jupyter/jupyter_lab_config.py')
+with open(config_file, 'a') as f:
+    f.write(f\"\\nc.ServerApp.password = '{passwd('$JUPYTER_PASSWORD')}'\\n\")
+    f.write('c.ServerApp.allow_remote_access = True\\n')
+    f.write('c.ServerApp.ip = \"0.0.0.0\"\\n')
+    f.write('c.ServerApp.port = 8888\\n')
+    f.write('c.ServerApp.open_browser = False\\n')
+print('Jupyter password configured')
+"
+fi
+
+# Start Jupyter Lab
+jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+EOF_JUPYTER
+
+chmod +x /home/opc/start-jupyter.sh
+chown opc:opc /home/opc/start-jupyter.sh
+
+echo "[STEP] create Oracle 23ai Free container service"
+cat > /usr/local/bin/start-oracle23ai.sh << 'EOF_ORACLE'
+#!/bin/bash
+set -e
+
+CONTAINER_NAME="oracle23ai-free"
+IMAGE_NAME="container-registry.oracle.com/database/free:latest"
+
+echo "Starting Oracle 23ai Free container setup..."
+
+# Create persistent data directory
+mkdir -p /home/opc/oradata
+chown -R 54321:54321 /home/opc/oradata
+
+# Pull the Oracle 23ai Free image
+echo "Pulling Oracle 23ai Free image..."
+podman pull $IMAGE_NAME
+
+# Stop and remove existing container if it exists
+podman stop $CONTAINER_NAME 2>/dev/null || true
+podman rm $CONTAINER_NAME 2>/dev/null || true
+
+# Start Oracle 23ai Free container
+echo "Starting Oracle 23ai Free container..."
+podman run -d \
+  --name $CONTAINER_NAME \
+  -p 1521:1521 \
+  -p 5500:5500 \
+  -e ORACLE_PWD=database123 \
+  -e ORACLE_CHARACTERSET=AL32UTF8 \
+  -v /home/opc/oradata:/opt/oracle/oradata \
+  $IMAGE_NAME
+
+echo "Oracle 23ai Free container started. Waiting for database to be ready..."
+
+# Wait for database to be ready
+for i in {1..60}; do
+    if podman logs $CONTAINER_NAME 2>&1 | grep -q "DATABASE IS READY TO USE"; then
+        echo "Oracle 23ai Free database is ready!"
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "Warning: Database may not be fully ready yet. Check logs with: podman logs $CONTAINER_NAME"
+    fi
+    sleep 10
+done
+
+echo "Oracle 23ai Free setup complete!"
+EOF_ORACLE
+
+chmod +x /usr/local/bin/start-oracle23ai.sh
+
+echo "[STEP] create systemd service for Oracle 23ai"
+cat > /etc/systemd/system/oracle23ai.service << 'EOF_SERVICE'
+[Unit]
+Description=Oracle 23ai Free Database Container
+After=network.target
+
+[Service]
+Type=forking
+User=root
+ExecStart=/usr/local/bin/start-oracle23ai.sh
+ExecStop=/usr/bin/podman stop oracle23ai-free
+ExecReload=/usr/bin/podman restart oracle23ai-free
+TimeoutStartSec=300
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERVICE
+
+# Enable and start Oracle service
+systemctl daemon-reload
+systemctl enable oracle23ai.service
+systemctl start oracle23ai.service
+
+echo "[STEP] download sample code and notebooks"
+sudo -u opc bash -c '
+cd /home/opc
+git clone https://github.com/oracle-samples/oracle-db-examples.git sample-code || true
+mkdir -p notebooks
+cd notebooks
+
+# Create sample notebook
+cat > welcome.ipynb << EOF_NOTEBOOK
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Welcome to your GenAI Environment\\n",
+    "\\n",
+    "This environment includes:\\n",
+    "- **Oracle 23ai Free** database with Vector Search capabilities\\n",
+    "- **Python 3** with Jupyter Lab\\n",
+    "- **Essential ML/AI libraries** (pandas, numpy, matplotlib, etc.)\\n",
+    "- **Secure access** via OCI Bastion Service\\n",
+    "\\n",
+    "## Quick Start\\n",
+    "\\n",
+    "1. Test database connection\\n",
+    "2. Explore sample datasets\\n",
+    "3. Build your first AI application"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import pandas as pd\\n",
+    "import numpy as np\\n",
+    "import matplotlib.pyplot as plt\\n",
+    "\\n",
+    "# Test basic functionality\\n",
+    "print(\"Environment ready!\")\\n",
+    "print(f\"Pandas version: {pd.__version__}\")\\n",
+    "print(f\"NumPy version: {np.__version__}\")"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "name": "python",
+   "version": "3.9.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
+EOF_NOTEBOOK
+'
+
+echo "[STEP] setup complete - creating marker file"
+touch "$MARKER"
+echo "===== GenAI OneClick systemd: completed $(date -u) ====="
+exit 0
+EOF_GENAI_SETUP
+
+chmod +x /usr/local/bin/genai-setup.sh
+
+echo "[STEP] create systemd service for genai setup"
+cat > /etc/systemd/system/genai-setup.service << 'EOF_SYSTEMD'
+[Unit]
+Description=GenAI Environment Setup
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/genai-setup.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target
+EOF_SYSTEMD
+
+# Enable and start the setup service
+systemctl daemon-reload
+systemctl enable genai-setup.service
+systemctl start genai-setup.service
+
+echo "===== Cloud-init setup complete. GenAI environment will be ready shortly. ====="
+echo "Check setup progress with: sudo journalctl -u genai-setup.service -f"
