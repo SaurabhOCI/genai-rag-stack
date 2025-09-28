@@ -87,56 +87,79 @@ pip install --no-cache-dir \
   pandas \
   numpy \
   matplotlib \
-  oracledb
+  seaborn \
+  requests \
+  python-dotenv \
+  oracledb \
+  scikit-learn \
+  plotly
 
 echo "source ~/.venvs/genai/bin/activate" >> /home/opc/.bashrc
 echo "Python environment ready"
 PYTHON_SETUP
 
-# Create Jupyter startup script
+# Create essential configuration files
+echo "Creating GenAI configuration files..."
+mkdir -p /opt/genai/txt-docs /opt/genai/pdf-docs
+cat > /opt/genai/LoadProperties.py << 'LOADPROPS'
+class LoadProperties:
+    def __init__(self):
+        import json
+        with open('config.txt') as f:
+            js = json.load(f)
+        self.model_name = js.get("model_name")
+        self.embedding_model_name = js.get("embedding_model_name")
+        self.endpoint = js.get("endpoint")
+        self.compartment_ocid = js.get("compartment_ocid")
+    def getModelName(self): return self.model_name
+    def getEmbeddingModelName(self): return self.embedding_model_name
+    def getEndpoint(self): return self.endpoint
+    def getCompartment(self): return self.compartment_ocid
+LOADPROPS
+
+cat > /opt/genai/config.txt << 'CONFIG'
+{"model_name":"cohere.command-r-16k","embedding_model_name":"cohere.embed-english-v3.0","endpoint":"https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com","compartment_ocid":"ocid1.compartment.oc1....replace_me..."}
+CONFIG
+
+echo "faq | What are Always Free services?=====Always Free services are part of Oracle Cloud Free Tier." > /opt/genai/txt-docs/faq.txt
+chown -R opc:opc /opt/genai
+
+# Create Jupyter startup script with authentication support
 cat > /home/opc/start-jupyter.sh << 'JUPYTER'
 #!/bin/bash
 source ~/.venvs/genai/bin/activate
-jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+export JUPYTER_CONFIG_DIR=/home/opc/.jupyter
+
+# Create jupyter config directory
+mkdir -p $JUPYTER_CONFIG_DIR
+
+# Generate Jupyter config if it doesn't exist
+if [ ! -f $JUPYTER_CONFIG_DIR/jupyter_lab_config.py ]; then
+    jupyter lab --generate-config
+fi
+
+# Configure authentication based on template variables
+if [ "$JUPYTER_ENABLE_AUTH" = "true" ] && [ -n "$JUPYTER_PASSWORD" ]; then
+    python3 -c "
+from jupyter_server.auth import passwd
+import os
+config_file = os.path.expanduser('~/.jupyter/jupyter_lab_config.py')
+with open(config_file, 'a') as f:
+    f.write(f\"\\nc.ServerApp.password = '{passwd('$JUPYTER_PASSWORD')}'\\n\")
+    f.write('c.ServerApp.allow_remote_access = True\\n')
+    f.write('c.ServerApp.ip = \"0.0.0.0\"\\n')
+    f.write('c.ServerApp.port = 8888\\n')
+    f.write('c.ServerApp.open_browser = False\\n')
+print('Jupyter password authentication configured')
+"
+    jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+else
+    # No authentication mode for easier development access
+    jupyter lab --NotebookApp.token='' --NotebookApp.password='' --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+fi
 JUPYTER
 chown opc:opc /home/opc/start-jupyter.sh
 chmod +x /home/opc/start-jupyter.sh
-
-echo "[STEP] Download sample code repositories"
-CODE_DIR="/home/opc/code"
-
-# Method 1: Try sparse checkout first
-TMP_DIR=$(mktemp -d)
-if git clone --depth 1 --filter=blob:none --sparse https://github.com/ou-developers/css-navigator.git "$TMP_DIR" 2>/dev/null; then
-    cd "$TMP_DIR"
-    git sparse-checkout init --cone 2>/dev/null || true
-    git sparse-checkout set gen-ai 2>/dev/null || true
-    
-    if [ -d "$TMP_DIR/gen-ai" ] && [ -n "$(ls -A "$TMP_DIR/gen-ai" 2>/dev/null)" ]; then
-        echo "Copying from sparse checkout"
-        cp -r "$TMP_DIR/gen-ai"/* "$CODE_DIR"/ 2>/dev/null || true
-    fi
-fi
-
-# Method 2: Fallback to zip download if sparse checkout failed
-if [ -z "$(ls -A "$CODE_DIR" 2>/dev/null)" ]; then
-    echo "Fallback to zip download"
-    cd /tmp
-    wget -q https://github.com/ou-developers/css-navigator/archive/refs/heads/main.zip -O css-nav.zip 2>/dev/null || \
-    curl -sL https://github.com/ou-developers/css-navigator/archive/refs/heads/main.zip -o css-nav.zip
-    
-    if [ -f css-nav.zip ]; then
-        unzip -q css-nav.zip
-        if [ -d css-navigator-main/gen-ai ]; then
-            cp -r css-navigator-main/gen-ai/* "$CODE_DIR"/ 2>/dev/null || true
-        fi
-        rm -rf css-navigator-main css-nav.zip
-    fi
-fi
-
-# Set proper ownership
-chown -R opc:opc "$CODE_DIR"
-chmod -R a+rX "$CODE_DIR"
 
 # Open firewall ports
 firewall-cmd --zone=public --add-port=8888/tcp --permanent || true
@@ -188,9 +211,59 @@ source /home/oracle/.bashrc
 sqlplus -S / as sysdba << SQL
 ALTER PLUGGABLE DATABASE FREEPDB1 OPEN;
 ALTER PLUGGABLE DATABASE FREEPDB1 SAVE STATE;
+ALTER SYSTEM REGISTER;
 EXIT
 SQL
 ' || true
+
+# Wait for FREEPDB1 service to be registered
+echo "[DB] Waiting for FREEPDB1 service registration..."
+for i in {1..60}; do
+  if $PODMAN exec "$NAME" bash -c '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
+    echo "[DB] FREEPDB1 service registered"
+    break
+  fi
+  sleep 5
+done
+
+# Create vector user and configure PDB for GenAI workloads
+echo "[DB] Creating vector user and configuring for GenAI..."
+$PODMAN exec -i "$NAME" bash -c '
+source /home/oracle/.bashrc
+sqlplus -S sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba << SQL
+WHENEVER SQLERROR CONTINUE
+
+-- Create additional tablespaces for GenAI workloads
+CREATE BIGFILE TABLESPACE tbs2 DATAFILE '"'"'bigtbs_f2.dbf'"'"' SIZE 1G AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL SEGMENT SPACE MANAGEMENT AUTO;
+CREATE UNDO TABLESPACE undots2 DATAFILE '"'"'undotbs_2a.dbf'"'"' SIZE 1G AUTOEXTEND ON RETENTION GUARANTEE;
+CREATE TEMPORARY TABLESPACE temp_demo TEMPFILE '"'"'temp02.dbf'"'"' SIZE 1G REUSE AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL UNIFORM SIZE 1M;
+
+-- Create vector user with proper permissions for AI workloads
+CREATE USER vector IDENTIFIED BY "vector" DEFAULT TABLESPACE tbs2 QUOTA UNLIMITED ON tbs2;
+GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE TO vector;
+GRANT UNLIMITED TABLESPACE TO vector;
+
+-- Additional grants for GenAI functionality
+GRANT CREATE ANY DIRECTORY TO vector;
+GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO vector;
+
+EXIT
+SQL
+' || echo "[DB] Warning: Some database configuration steps may have failed"
+
+# Configure CDB-level settings for vector operations
+echo "[DB] Configuring vector memory settings..."
+$PODMAN exec -i "$NAME" bash -c '
+source /home/oracle/.bashrc
+sqlplus -S / as sysdba << SQL
+WHENEVER SQLERROR CONTINUE
+CREATE PFILE FROM SPFILE;
+ALTER SYSTEM SET vector_memory_size = 512M SCOPE=SPFILE;
+SHUTDOWN IMMEDIATE;
+STARTUP;
+EXIT
+SQL
+' || echo "[DB] Warning: Vector memory configuration may have failed"
 
 echo "[DB] Database setup complete"
 EOF
