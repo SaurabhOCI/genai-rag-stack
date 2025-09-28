@@ -149,15 +149,15 @@ python3 -m venv $HOME/.venvs/genai
 echo "Activating virtual environment..."
 source $HOME/.venvs/genai/bin/activate
 
-echo "Upgrading pip..."
+echo "Upgrading pip to latest version..."
 pip install --upgrade pip wheel setuptools
 
-echo "Installing Python packages..."
+echo "Installing Python packages with compatible versions..."
 pip install --no-cache-dir \
-  jupyterlab==4.2.5 \
+  "jupyterlab>=3.0.0,<4.0.0" \
   notebook \
   ipython \
-  streamlit==1.36.0 \
+  "streamlit>=1.20.0" \
   pandas \
   numpy \
   matplotlib \
