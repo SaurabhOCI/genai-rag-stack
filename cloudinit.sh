@@ -3,6 +3,7 @@
 # - Enhanced for private subnet deployment with Bastion Service
 # - Configurable Jupyter authentication
 # - Improved error handling and logging
+# - Direct execution without systemd dependencies
 
 set -Eeuo pipefail
 
@@ -15,81 +16,16 @@ JUPYTER_ENABLE_AUTH="${jupyter_enable_auth}"
 JUPYTER_PASSWORD="${jupyter_password}"
 BASTION_ENABLED="${bastion_enabled}"
 
-# --------------------------------------------------------------------
-# Grow filesystem (best-effort)
-# --------------------------------------------------------------------
-if command -v /usr/libexec/oci-growfs >/dev/null 2>&1; then
-  /usr/libexec/oci-growfs -y || true
-fi
-
-# --------------------------------------------------------------------
-# PRE: install Podman so the DB unit can run right away
-# --------------------------------------------------------------------
-echo "[PRE] installing Podman and basics"
-
-# Disable problematic repositories that might cause connectivity issues
-dnf config-manager --set-disabled ol8_ksplice || true
-
-# Clean and refresh cache
-dnf clean all || true
-dnf makecache --refresh || true
-
-# Enable required repositories with error handling
-dnf config-manager --set-enabled ol8_addons || true
-dnf config-manager --set-enabled ol8_appstream || true
-dnf config-manager --set-enabled ol8_baseos_latest || true
-
-# Install core packages with retries
-install_with_retry() {
-    local max_attempts=3
-    local attempt=1
-    
-    while [ $attempt -le $max_attempts ]; do
-        echo "[PRE] Installation attempt $attempt of $max_attempts"
-        if dnf -y install podman curl grep coreutils shadow-utils git unzip; then
-            echo "[PRE] Installation successful"
-            return 0
-        else
-            echo "[PRE] Installation attempt $attempt failed, retrying..."
-            sleep 10
-            attempt=$((attempt + 1))
-        fi
-    done
-    
-    echo "[PRE] All installation attempts failed"
-    return 1
-}
-
-# Try installation with retries
-if ! install_with_retry; then
-    echo "[PRE] Critical: Could not install required packages"
-    exit 1
-fi
-
-# Verify critical tools are available
-if ! command -v podman >/dev/null 2>&1; then
-    echo "[PRE] Critical: podman not found after installation"
-    exit 1
-fi
-
-/usr/bin/podman --version || { echo "[PRE] podman installation verification failed"; exit 1; }
-echo "[PRE] Successfully installed Podman and dependencies"
-
-# ====================================================================
-# genai-setup.sh (MAIN provisioning) — enhanced for bastion
-# ====================================================================
-cat > /usr/local/bin/genai-setup.sh << 'GENAI_SETUP_SCRIPT'
-#!/bin/bash
-set -uxo pipefail
-
-echo "===== GenAI OneClick systemd: start $(date -u) ====="
-
+# Set marker file path
 MARKER="/var/lib/genai.oneclick.done"
+
+# Exit if already completed
 if [[ -f "$MARKER" ]]; then
-  echo "[INFO] already provisioned; exiting."
+  echo "[INFO] Setup already completed. Exiting."
   exit 0
 fi
 
+# Utility function for retries
 retry() { 
     local max=$${1:-5}; shift; local n=1; 
     until "$@"; do 
@@ -102,28 +38,70 @@ retry() {
     return 0; 
 }
 
-echo "[STEP] enable ol8_addons, pre-populate metadata, and install base pkgs"
-retry 5 dnf -y install dnf-plugins-core curl
-retry 5 dnf config-manager --set-enabled ol8_addons || true
-retry 5 dnf -y makecache --refresh
-retry 5 dnf -y install \
-  git unzip jq tar make gcc gcc-c++ bzip2 bzip2-devel zlib-devel openssl-devel readline-devel libffi-devel \
-  wget curl which xz python3 python3-pip python39 python39-pip podman firewalld
+# --------------------------------------------------------------------
+# Grow filesystem (best-effort)
+# --------------------------------------------------------------------
+echo "[STEP] Growing filesystem"
+if command -v /usr/libexec/oci-growfs >/dev/null 2>&1; then
+  /usr/libexec/oci-growfs -y || true
+fi
 
-echo "[STEP] enable firewalld"
+# --------------------------------------------------------------------
+# Install base packages
+# --------------------------------------------------------------------
+echo "[STEP] Installing base packages with Podman"
+
+# Disable problematic repositories
+dnf config-manager --set-disabled ol8_ksplice || true
+
+# Clean and refresh cache
+dnf clean all || true
+dnf makecache --refresh || true
+
+# Enable required repositories
+dnf config-manager --set-enabled ol8_addons || true
+dnf config-manager --set-enabled ol8_appstream || true
+dnf config-manager --set-enabled ol8_baseos_latest || true
+
+# Install core packages with retries
+echo "[STEP] Installing essential packages"
+retry 5 dnf -y install \
+  podman curl grep coreutils shadow-utils git unzip \
+  dnf-plugins-core jq tar make gcc gcc-c++ \
+  bzip2 bzip2-devel zlib-devel openssl-devel readline-devel libffi-devel \
+  wget which xz python3 python3-pip python39 python39-pip firewalld
+
+echo "[STEP] Verifying Podman installation"
+if ! command -v podman >/dev/null 2>&1; then
+    echo "[ERROR] Podman installation failed"
+    exit 1
+fi
+
+podman --version
+echo "[SUCCESS] Podman and base packages installed"
+
+# --------------------------------------------------------------------
+# Enable firewalld
+# --------------------------------------------------------------------
+echo "[STEP] Enabling firewalld"
 systemctl enable --now firewalld || true
 
-echo "[STEP] create /opt/genai and /home/opc directories"
-mkdir -p /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts /home/opc/.venvs
-chown -R opc:opc /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts /home/opc/.venvs
+# --------------------------------------------------------------------
+# Create directory structure
+# --------------------------------------------------------------------
+echo "[STEP] Creating directory structure"
+mkdir -p /opt/genai /home/opc/{code,bin,scripts,.venvs,notebooks,oradata}
+chown -R opc:opc /opt/genai /home/opc/code /home/opc/bin /home/opc/scripts /home/opc/.venvs /home/opc/notebooks
 
-GENAI_SETUP_SCRIPT
+# Set proper permissions for Oracle data directory
+chown -R 54321:54321 /home/opc/oradata || true
+chmod -R 755 /home/opc/oradata
 
-# Add bastion-specific content only if enabled
+# --------------------------------------------------------------------
+# Create bastion helper scripts (if enabled)
+# --------------------------------------------------------------------
 if [ "$BASTION_ENABLED" = "true" ]; then
-cat >> /usr/local/bin/genai-setup.sh << 'BASTION_SECTION'
-
-echo "[STEP] create bastion helper scripts"
+echo "[STEP] Creating bastion helper scripts"
 cat > /home/opc/scripts/bastion-info.sh << 'BASTION_INFO_SCRIPT'
 #!/bin/bash
 echo "=== OCI Bastion Service Information ==="
@@ -154,22 +132,28 @@ chown opc:opc /home/opc/scripts/bastion-info.sh
 
 # Add to .bashrc
 echo "echo 'Run ~/scripts/bastion-info.sh for connection information'" >> /home/opc/.bashrc
-
-BASTION_SECTION
 fi
 
-# Continue with the rest of the setup script
-cat >> /usr/local/bin/genai-setup.sh << 'MAIN_SETUP_CONTINUE'
-
-echo "[STEP] create Python virtual environment"
-sudo -u opc bash -c '
+# --------------------------------------------------------------------
+# Create Python virtual environment and install packages
+# --------------------------------------------------------------------
+echo "[STEP] Creating Python virtual environment"
+sudo -u opc bash << 'PYTHON_SETUP'
+set -e
 export HOME=/home/opc
+cd $HOME
+
+echo "Creating virtual environment..."
 python3 -m venv $HOME/.venvs/genai
+
+echo "Activating virtual environment..."
 source $HOME/.venvs/genai/bin/activate
+
+echo "Upgrading pip..."
 pip install --upgrade pip wheel setuptools
 
-# Install essential packages
-pip install \
+echo "Installing Python packages..."
+pip install --no-cache-dir \
   jupyterlab==4.2.5 \
   notebook \
   ipython \
@@ -180,17 +164,24 @@ pip install \
   seaborn \
   requests \
   python-dotenv \
-  oracledb
+  oracledb \
+  plotly \
+  scikit-learn
 
-echo "Virtual environment created successfully"
-'
+echo "Python environment setup complete"
+PYTHON_SETUP
 
-echo "[STEP] add venv activation to .bashrc"
+# Add virtual environment activation to .bashrc
 echo 'source ~/.venvs/genai/bin/activate' >> /home/opc/.bashrc
 chown opc:opc /home/opc/.bashrc
 
-echo "[STEP] create Jupyter startup script"
-cat > /home/opc/start-jupyter.sh << 'JUPYTER_SCRIPT'
+echo "[SUCCESS] Python virtual environment created with Jupyter Lab"
+
+# --------------------------------------------------------------------
+# Create Jupyter startup script
+# --------------------------------------------------------------------
+echo "[STEP] Creating Jupyter startup script"
+cat > /home/opc/start-jupyter.sh << 'JUPYTER_STARTUP'
 #!/bin/bash
 source ~/.venvs/genai/bin/activate
 export JUPYTER_CONFIG_DIR=/home/opc/.jupyter
@@ -202,14 +193,13 @@ mkdir -p $JUPYTER_CONFIG_DIR
 if [ ! -f $JUPYTER_CONFIG_DIR/jupyter_lab_config.py ]; then
     jupyter lab --generate-config
 fi
+JUPYTER_STARTUP
 
-MAIN_SETUP_CONTINUE
-
-# Add Jupyter authentication setup if enabled
+# Add Jupyter authentication if enabled
 if [ "$JUPYTER_ENABLE_AUTH" = "true" ] && [ -n "$JUPYTER_PASSWORD" ]; then
-cat >> /usr/local/bin/genai-setup.sh << 'JUPYTER_AUTH_SECTION'
+cat >> /home/opc/start-jupyter.sh << JUPYTER_AUTH_SECTION
 
-# Set password
+# Configure password authentication
 python3 -c "
 from jupyter_server.auth import passwd
 import os
@@ -220,22 +210,27 @@ with open(config_file, 'a') as f:
     f.write('c.ServerApp.ip = \"0.0.0.0\"\\n')
     f.write('c.ServerApp.port = 8888\\n')
     f.write('c.ServerApp.open_browser = False\\n')
-print('Jupyter password configured')
+print('Jupyter password authentication configured')
 "
-
 JUPYTER_AUTH_SECTION
 fi
 
-cat >> /usr/local/bin/genai-setup.sh << 'JUPYTER_SCRIPT_END'
+cat >> /home/opc/start-jupyter.sh << 'JUPYTER_STARTUP_END'
 
 # Start Jupyter Lab
+echo "Starting Jupyter Lab..."
 jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
-JUPYTER_SCRIPT
+JUPYTER_STARTUP_END
 
 chmod +x /home/opc/start-jupyter.sh
 chown opc:opc /home/opc/start-jupyter.sh
 
-echo "[STEP] create Oracle 23ai Free container service"
+echo "[SUCCESS] Jupyter startup script created"
+
+# --------------------------------------------------------------------
+# Create Oracle 23ai container setup
+# --------------------------------------------------------------------
+echo "[STEP] Creating Oracle 23ai container setup"
 cat > /usr/local/bin/start-oracle23ai.sh << 'ORACLE_SCRIPT'
 #!/bin/bash
 set -e
@@ -268,77 +263,51 @@ podman run -d \
   -v /home/opc/oradata:/opt/oracle/oradata \
   $IMAGE_NAME
 
-echo "Oracle 23ai Free container started. Waiting for database to be ready..."
-
-# Wait for database to be ready
-for i in {1..60}; do
-    if podman logs $CONTAINER_NAME 2>&1 | grep -q "DATABASE IS READY TO USE"; then
-        echo "Oracle 23ai Free database is ready!"
-        break
-    fi
-    if [ $i -eq 60 ]; then
-        echo "Warning: Database may not be fully ready yet. Check logs with: podman logs $CONTAINER_NAME"
-    fi
-    sleep 10
-done
-
-echo "Oracle 23ai Free setup complete!"
+echo "Oracle 23ai Free container started. Database will be ready in a few minutes."
+echo "Check status with: podman logs $CONTAINER_NAME"
 ORACLE_SCRIPT
 
 chmod +x /usr/local/bin/start-oracle23ai.sh
 
-echo "[STEP] create systemd service for Oracle 23ai"
-cat > /etc/systemd/system/oracle23ai.service << 'ORACLE_SERVICE'
-[Unit]
-Description=Oracle 23ai Free Database Container
-After=network.target
+# Start Oracle 23ai in the background
+echo "[STEP] Starting Oracle 23ai container"
+nohup /usr/local/bin/start-oracle23ai.sh > /var/log/oracle23ai-setup.log 2>&1 &
 
-[Service]
-Type=forking
-User=root
-ExecStart=/usr/local/bin/start-oracle23ai.sh
-ExecStop=/usr/bin/podman stop oracle23ai-free
-ExecReload=/usr/bin/podman restart oracle23ai-free
-TimeoutStartSec=300
-Restart=on-failure
-RestartSec=30
+echo "[SUCCESS] Oracle 23ai container setup initiated"
 
-[Install]
-WantedBy=multi-user.target
-ORACLE_SERVICE
-
-# Enable and start Oracle service
-systemctl daemon-reload
-systemctl enable oracle23ai.service
-systemctl start oracle23ai.service
-
-echo "[STEP] download sample code and notebooks"
-sudo -u opc bash -c '
+# --------------------------------------------------------------------
+# Download sample code and create welcome notebook
+# --------------------------------------------------------------------
+echo "[STEP] Setting up sample code and notebooks"
+sudo -u opc bash << 'SAMPLE_SETUP'
 cd /home/opc
+
+# Clone sample code repository
 git clone https://github.com/oracle-samples/oracle-db-examples.git sample-code || true
-mkdir -p notebooks
+
+# Create sample notebooks
 cd notebooks
 
-# Create sample notebook
-cat > welcome.ipynb << "NOTEBOOK_JSON"
+# Create welcome notebook
+cat > welcome.ipynb << 'NOTEBOOK_JSON'
 {
  "cells": [
   {
    "cell_type": "markdown",
    "metadata": {},
    "source": [
-    "# Welcome to your GenAI Environment\\n",
-    "\\n",
-    "This environment includes:\\n",
-    "- **Oracle 23ai Free** database with Vector Search capabilities\\n",
-    "- **Python 3** with Jupyter Lab\\n",
-    "- **Essential ML/AI libraries** (pandas, numpy, matplotlib, etc.)\\n",
-    "- **Secure access** via OCI Bastion Service\\n",
-    "\\n",
-    "## Quick Start\\n",
-    "\\n",
-    "1. Test database connection\\n",
-    "2. Explore sample datasets\\n",
+    "# Welcome to your GenAI Environment\n",
+    "\n",
+    "This environment includes:\n",
+    "- **Oracle 23ai Free** database with Vector Search capabilities\n",
+    "- **Python 3** with Jupyter Lab\n",
+    "- **Essential ML/AI libraries** (pandas, numpy, matplotlib, etc.)\n",
+    "- **Secure access** via OCI Bastion Service\n",
+    "\n",
+    "## Quick Start\n",
+    "\n",
+    "1. Test database connection\n",
+    "2. Explore sample datasets\n",
     "3. Build your first AI application"
    ]
   },
@@ -348,13 +317,13 @@ cat > welcome.ipynb << "NOTEBOOK_JSON"
    "metadata": {},
    "outputs": [],
    "source": [
-    "import pandas as pd\\n",
-    "import numpy as np\\n",
-    "import matplotlib.pyplot as plt\\n",
-    "\\n",
-    "# Test basic functionality\\n",
-    "print(\"Environment ready!\")\\n",
-    "print(f\"Pandas version: {pd.__version__}\")\\n",
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "import matplotlib.pyplot as plt\n",
+    "\n",
+    "# Test basic functionality\n",
+    "print(\"Environment ready!\")\n",
+    "print(f\"Pandas version: {pd.__version__}\")\n",
     "print(f\"NumPy version: {np.__version__}\")"
    ]
   }
@@ -374,40 +343,40 @@ cat > welcome.ipynb << "NOTEBOOK_JSON"
  "nbformat_minor": 4
 }
 NOTEBOOK_JSON
-'
 
-echo "[STEP] setup complete - creating marker file"
+echo "Sample notebooks created"
+SAMPLE_SETUP
+
+echo "[SUCCESS] Sample code and notebooks setup complete"
+
+# --------------------------------------------------------------------
+# Final verification and completion
+# --------------------------------------------------------------------
+echo "[STEP] Performing final verification"
+
+# Verify Jupyter installation
+sudo -u opc bash -c 'source ~/.venvs/genai/bin/activate && jupyter --version' || {
+    echo "[ERROR] Jupyter verification failed"
+    exit 1
+}
+
+# Verify essential Python packages
+sudo -u opc bash -c 'source ~/.venvs/genai/bin/activate && python -c "import pandas, numpy, matplotlib; print(\"Essential packages verified\")"' || {
+    echo "[ERROR] Python packages verification failed"
+    exit 1
+}
+
+echo "[SUCCESS] All verifications passed"
+
+# Create completion marker
 touch "$MARKER"
-echo "===== GenAI OneClick systemd: completed $(date -u) ====="
-exit 0
+echo "Setup completed at: $(date -u)" > "$MARKER"
 
-JUPYTER_SCRIPT_END
-
-chmod +x /usr/local/bin/genai-setup.sh
-
-echo "[STEP] create systemd service for genai setup"
-cat > /etc/systemd/system/genai-setup.service << 'SYSTEMD_SERVICE'
-[Unit]
-Description=GenAI Environment Setup
-After=network.target
-Wants=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/genai-setup.sh
-RemainAfterExit=yes
-StandardOutput=journal
-StandardError=journal
-TimeoutStartSec=1800
-
-[Install]
-WantedBy=multi-user.target
-SYSTEMD_SERVICE
-
-# Enable and start the setup service
-systemctl daemon-reload
-systemctl enable genai-setup.service
-systemctl start genai-setup.service
-
-echo "===== Cloud-init setup complete. GenAI environment will be ready shortly. ====="
-echo "Check setup progress with: sudo journalctl -u genai-setup.service -f"
+echo "===== GenAI OneClick setup completed successfully: $(date -u) ====="
+echo "Environment ready for use!"
+echo ""
+echo "To start Jupyter Lab: ./start-jupyter.sh"
+echo "To check Oracle DB: podman logs oracle23ai-free"
+if [ "$BASTION_ENABLED" = "true" ]; then
+echo "For connection info: ~/scripts/bastion-info.sh"
+fi
