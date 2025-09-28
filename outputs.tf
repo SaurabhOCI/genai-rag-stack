@@ -35,62 +35,54 @@ output "bastion_service_name" {
   value = var.enable_bastion_service ? oci_bastion_bastion.genai_bastion[0].name : null
 }
 
-# Bastion Plugin Status
-output "bastion_plugin_status" {
-  description = "Status of the Bastion plugin on the target instance"
-  value = var.enable_bastion_service && var.enable_bastion_sessions && length(data.external.bastion_plugin_status) > 0 ? {
-    ready  = data.external.bastion_plugin_status[0].result.ready
-    status = data.external.bastion_plugin_status[0].result.status
+# Bastion Plugin Information
+output "bastion_plugin_info" {
+  description = "Information about Bastion plugin requirements"
+  value = var.enable_bastion_service ? {
+    managed_ssh_enabled = var.enable_managed_ssh
+    wait_time_applied   = "10 minutes"
+    note               = "MANAGED_SSH requires Bastion plugin in RUNNING state. Use PORT_FORWARDING for immediate access."
   } : null
 }
 
-# Connection Commands - Enhanced with fallback options
+# Connection Commands - Simplified
 output "ssh_connection_command" {
   description = "SSH connection command via bastion"
   value = var.enable_bastion_service && var.enable_bastion_sessions ? (
-    length(oci_bastion_session.genai_ssh) > 0 && oci_bastion_session.genai_ssh[0].ssh_metadata != null ? 
-    try(oci_bastion_session.genai_ssh[0].ssh_metadata["command"], 
-        length(oci_bastion_session.ssh_port_forward) > 0 && oci_bastion_session.ssh_port_forward[0].ssh_metadata != null ?
-        "${try(oci_bastion_session.ssh_port_forward[0].ssh_metadata["command"], "Check OCI Console for SSH connection details")} # Port forwarding to SSH" :
-        "Check OCI Console for SSH connection details") : 
-    length(oci_bastion_session.ssh_port_forward) > 0 && oci_bastion_session.ssh_port_forward[0].ssh_metadata != null ?
-    "${try(oci_bastion_session.ssh_port_forward[0].ssh_metadata["command"], "Check OCI Console for connection details")} # Port forwarding to SSH" :
-    "Sessions created but SSH commands not available yet. Check OCI Console for connection details."
+    length(oci_bastion_session.genai_ssh) > 0 ? 
+    "MANAGED_SSH session created. Use: oci bastion session get --session-id ${oci_bastion_session.genai_ssh[0].id} to get connection command" :
+    length(oci_bastion_session.ssh_port_forward) > 0 ?
+    "PORT_FORWARDING SSH session created. Use: oci bastion session get --session-id ${oci_bastion_session.ssh_port_forward[0].id} to get connection command" :
+    "Check OCI Console for SSH connection details"
   ) : "Direct SSH: ssh -i ~/.ssh/id_rsa opc@${oci_core_instance.genai.public_ip}"
   sensitive = false
 }
 
 output "jupyter_connection_command" {
   description = "Jupyter Lab connection command"
-  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.jupyter_tunnel) > 0 ? (
-    oci_bastion_session.jupyter_tunnel[0].ssh_metadata != null ? 
-    "${try(oci_bastion_session.jupyter_tunnel[0].ssh_metadata["command"], "Check OCI Console for connection details")} then access http://localhost:8888" : 
-    "Session created but SSH command not available yet. Check OCI Console for connection details."
-  ) : "Direct access: http://${oci_core_instance.genai.public_ip}:8888"
+  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.jupyter_tunnel) > 0 ? 
+    "Jupyter tunnel created. Use: oci bastion session get --session-id ${oci_bastion_session.jupyter_tunnel[0].id} to get connection command, then access http://localhost:8888" : 
+    "Direct access: http://${oci_core_instance.genai.public_ip}:8888"
   sensitive = false
 }
 
 output "streamlit_connection_command" {
   description = "Streamlit connection command"
-  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.streamlit_tunnel) > 0 ? (
-    oci_bastion_session.streamlit_tunnel[0].ssh_metadata != null ? 
-    "${try(oci_bastion_session.streamlit_tunnel[0].ssh_metadata["command"], "Check OCI Console for connection details")} then access http://localhost:8501" : 
-    "Session created but SSH command not available yet. Check OCI Console for connection details."
-  ) : "Direct access: http://${oci_core_instance.genai.public_ip}:8501"
+  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.streamlit_tunnel) > 0 ? 
+    "Streamlit tunnel created. Use: oci bastion session get --session-id ${oci_bastion_session.streamlit_tunnel[0].id} to get connection command, then access http://localhost:8501" : 
+    "Direct access: http://${oci_core_instance.genai.public_ip}:8501"
   sensitive = false
 }
 
 output "database_connection_command" {
   description = "Oracle database connection command"
-  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.database_tunnel) > 0 ? (
-    oci_bastion_session.database_tunnel[0].ssh_metadata != null ? 
-    "${try(oci_bastion_session.database_tunnel[0].ssh_metadata["command"], "Check OCI Console for connection details")} then connect to localhost:1521/FREEPDB1" : 
-    "Session created but SSH command not available yet. Check OCI Console for connection details."
-  ) : "Direct connection: ${oci_core_instance.genai.public_ip}:1521/FREEPDB1"
+  value = var.enable_bastion_service && var.enable_bastion_sessions && length(oci_bastion_session.database_tunnel) > 0 ? 
+    "Database tunnel created. Use: oci bastion session get --session-id ${oci_bastion_session.database_tunnel[0].id} to get connection command, then connect to localhost:1521/FREEPDB1" : 
+    "Direct connection: ${oci_core_instance.genai.public_ip}:1521/FREEPDB1"
   sensitive = false
 }
 
-# Enhanced Bastion Session IDs with new sessions
+# Bastion Session IDs
 output "bastion_session_ids" {
   description = "Bastion session IDs for manual connection"
   value = var.enable_bastion_service && var.enable_bastion_sessions ? {
@@ -124,10 +116,11 @@ output "deployment_summary" {
     instance_ocpus      = var.instance_ocpus
     instance_memory_gb  = var.instance_memory_gbs
     plugin_wait_time    = "10 minutes (Oracle documented maximum)"
+    managed_ssh_enabled = var.enable_managed_ssh
   }
 }
 
-# Enhanced manual connection instructions
+# Manual connection instructions
 output "manual_connection_guide" {
   description = "Manual connection instructions for bastion sessions"
   value = var.enable_bastion_service ? "Use 'oci bastion session list --bastion-id ${oci_bastion_bastion.genai_bastion[0].id}' to list sessions, then 'oci bastion session get --session-id SESSION_ID' to get connection commands. MANAGED_SSH sessions require Bastion plugin to be RUNNING (may take up to 10 minutes). PORT_FORWARDING sessions are available immediately. For port forwarding add: -L 8888:${oci_core_instance.genai.private_ip}:8888 (Jupyter), -L 8501:${oci_core_instance.genai.private_ip}:8501 (Streamlit), -L 1521:${oci_core_instance.genai.private_ip}:1521 (Database)" : "Bastion service not enabled. Use direct IP access."
@@ -142,5 +135,6 @@ output "troubleshooting_info" {
     wait_time_note = "Bastion plugin can take up to 10 minutes to initialize after instance creation"
     fallback_access = "Use PORT_FORWARDING sessions for immediate access while waiting for MANAGED_SSH"
     retry_suggestion = "If MANAGED_SSH fails, wait 5-10 minutes and run 'terraform apply' again"
+    managed_ssh_note = "Set enable_managed_ssh=true to create MANAGED_SSH sessions after plugin is ready"
   } : null
 }
