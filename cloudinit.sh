@@ -68,7 +68,7 @@ cat > /usr/local/bin/genai-setup.sh << 'EOF'
 set -e
 
 MARKER="/var/lib/genai.oneclick.done"
-if [[ -f "${MARKER}" ]]; then
+if [[ -f "$${MARKER}" ]]; then
   echo "Already provisioned"
   exit 0
 fi
@@ -128,18 +128,18 @@ LOADPROPS
 # FIX 2: Bulletproof Code Download
 echo "[STEP] Download sample code repositories"
 CODE_DIR="/home/opc/code"
-mkdir -p "$CODE_DIR"
+mkdir -p "$${CODE_DIR}"
 
 # Multiple download strategies
 download_success=false
 
 # Strategy 1: Direct wget
-if ! ${download_success}; then
+if ! $${download_success}; then
     echo "Trying wget download..."
     cd /tmp
     if timeout 60 wget -q --no-check-certificate https://github.com/ou-developers/css-navigator/archive/refs/heads/main.zip; then
         if unzip -q main.zip && [ -d css-navigator-main/gen-ai ]; then
-            cp -r css-navigator-main/gen-ai/* "${CODE_DIR}"/ 2>/dev/null && download_success=true
+            cp -r css-navigator-main/gen-ai/* "$${CODE_DIR}"/ 2>/dev/null && download_success=true
             echo "✓ Code downloaded via wget"
         fi
         rm -rf css-navigator-main main.zip
@@ -147,12 +147,12 @@ if ! ${download_success}; then
 fi
 
 # Strategy 2: curl fallback
-if ! ${download_success}; then
+if ! $${download_success}; then
     echo "Trying curl download..."
     cd /tmp
     if timeout 60 curl -sL https://github.com/ou-developers/css-navigator/archive/refs/heads/main.zip -o main.zip; then
         if unzip -q main.zip && [ -d css-navigator-main/gen-ai ]; then
-            cp -r css-navigator-main/gen-ai/* "${CODE_DIR}"/ 2>/dev/null && download_success=true
+            cp -r css-navigator-main/gen-ai/* "$${CODE_DIR}"/ 2>/dev/null && download_success=true
             echo "✓ Code downloaded via curl"
         fi
         rm -rf css-navigator-main main.zip
@@ -160,17 +160,17 @@ if ! ${download_success}; then
 fi
 
 # Strategy 3: Create basic structure if all fails
-if ! ${download_success}; then
+if ! $${download_success}; then
     echo "⚠ Downloads failed - creating basic structure"
-    echo "# Sample notebook" > "${CODE_DIR}/sample.ipynb"
-    echo "print('Hello from Jupyter!')" > "${CODE_DIR}/hello.py"
-    echo "# GenAI Sample Files" > "${CODE_DIR}/README.md"
-    echo "Files will be available for manual download" >> "${CODE_DIR}/README.md"
+    echo "# Sample notebook" > "$${CODE_DIR}/sample.ipynb"
+    echo "print('Hello from Jupyter!')" > "$${CODE_DIR}/hello.py"
+    echo "# GenAI Sample Files" > "$${CODE_DIR}/README.md"
+    echo "Files will be available for manual download" >> "$${CODE_DIR}/README.md"
 fi
 
 # Always set proper ownership
-chown -R opc:opc "${CODE_DIR}"
-chmod -R 755 "${CODE_DIR}"
+chown -R opc:opc "$${CODE_DIR}"
+chmod -R 755 "$${CODE_DIR}"
 
 cat > /opt/genai/config.txt << 'CONFIG'
 {"model_name":"cohere.command-r-16k","embedding_model_name":"cohere.embed-english-v3.0","endpoint":"https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com","compartment_ocid":"ocid1.compartment.oc1....replace_me..."}
@@ -184,27 +184,31 @@ cat > /home/opc/start-jupyter.sh << 'JUPYTER_EOF'
 #!/bin/bash
 source ~/.venvs/genai/bin/activate
 export JUPYTER_CONFIG_DIR=/home/opc/.jupyter
-mkdir -p ${JUPYTER_CONFIG_DIR}
+mkdir -p $${JUPYTER_CONFIG_DIR}
 
 # Check for password from multiple sources
 JUPYTER_PASSWORD=""
 if [ -f /tmp/jupyter_password.txt ]; then
-    JUPYTER_PASSWORD=$(cat /tmp/jupyter_password.txt)
-elif [ -n "${JUPYTER_PASSWORD_ENV}" ]; then
-    JUPYTER_PASSWORD="${JUPYTER_PASSWORD_ENV}"
+    JUPYTER_PASSWORD=$$(cat /tmp/jupyter_password.txt)
+elif [ -n "$${JUPYTER_PASSWORD_ENV}" ]; then
+    JUPYTER_PASSWORD="$${JUPYTER_PASSWORD_ENV}"
 fi
 
-# Check authentication flag
-JUPYTER_ENABLE_AUTH="${JUPYTER_ENABLE_AUTH_ENV:-false}"
+# Check authentication flag - avoiding problematic syntax
+if [ -n "$${JUPYTER_ENABLE_AUTH_ENV}" ]; then
+    JUPYTER_ENABLE_AUTH="$${JUPYTER_ENABLE_AUTH_ENV}"
+else
+    JUPYTER_ENABLE_AUTH="false"
+fi
 
-if [ "${JUPYTER_ENABLE_AUTH}" = "true" ] && [ -n "${JUPYTER_PASSWORD}" ]; then
+if [ "$${JUPYTER_ENABLE_AUTH}" = "true" ] && [ -n "$${JUPYTER_PASSWORD}" ]; then
     echo "Setting up Jupyter with password authentication..."
     python3 -c "
 from jupyter_server.auth import passwd
 with open('/home/opc/.jupyter/jupyter_lab_config.py', 'w') as f:
-    f.write(f\"c.ServerApp.password = '{passwd('$JUPYTER_PASSWORD')}'\\n\")
+    f.write(f\"c.ServerApp.password = '{passwd('$${JUPYTER_PASSWORD}')}\\n\")
     f.write('c.ServerApp.allow_remote_access = True\\n')
-    f.write('c.ServerApp.ip = \"0.0.0.0\"\\n')
+    f.write('c.ServerApp.ip = \\\"0.0.0.0\\\"\\n')
     f.write('c.ServerApp.port = 8888\\n')
     f.write('c.ServerApp.open_browser = False\\n')
 "
@@ -223,7 +227,7 @@ firewall-cmd --zone=public --add-port=8501/tcp --permanent || true
 firewall-cmd --zone=public --add-port=1521/tcp --permanent || true
 firewall-cmd --reload || true
 
-touch "${MARKER}"
+touch "$${MARKER}"
 echo "GenAI setup complete"
 EOF
 
@@ -241,19 +245,19 @@ IMAGE="container-registry.oracle.com/database/free:latest"
 NAME="23ai"
 
 # Pull image and start container
-${PODMAN} pull "${IMAGE}" || exit 1
-${PODMAN} rm -f "${NAME}" || true
+$${PODMAN} pull "$${IMAGE}" || exit 1
+$${PODMAN} rm -f "$${NAME}" || true
 
-${PODMAN} run -d --name "${NAME}" --network=host \
-  -e ORACLE_PWD="${ORACLE_PWD}" \
+$${PODMAN} run -d --name "$${NAME}" --network=host \
+  -e ORACLE_PWD="$${ORACLE_PWD}" \
   -e ORACLE_PDB="FREEPDB1" \
   -e ORACLE_MEMORY='2048' \
   -v /home/opc/oradata:/opt/oracle/oradata:z \
-  "${IMAGE}"
+  "$${IMAGE}"
 
 echo "[DB] Waiting for database to be ready..."
 for i in {1..120}; do
-  if ${PODMAN} logs "${NAME}" 2>&1 | grep -q 'DATABASE IS READY TO USE!'; then
+  if $${PODMAN} logs "$${NAME}" 2>&1 | grep -q 'DATABASE IS READY TO USE!'; then
     echo "[DB] Database ready"
     break
   fi
@@ -262,7 +266,7 @@ done
 
 # Configure database
 echo "[DB] Configuring database..."
-${PODMAN} exec -i "${NAME}" bash -c '
+$${PODMAN} exec -i "$${NAME}" bash -c '
 source /home/oracle/.bashrc
 sqlplus -S / as sysdba << SQL
 ALTER PLUGGABLE DATABASE FREEPDB1 OPEN;
@@ -275,7 +279,7 @@ SQL
 # Wait for FREEPDB1 service to be registered
 echo "[DB] Waiting for FREEPDB1 service registration..."
 for i in {1..60}; do
-  if ${PODMAN} exec "${NAME}" bash -c '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
+  if $${PODMAN} exec "$${NAME}" bash -c '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
     echo "[DB] FREEPDB1 service registered"
     break
   fi
@@ -284,7 +288,7 @@ done
 
 # Create vector user and configure PDB for GenAI workloads
 echo "[DB] Creating vector user and configuring for GenAI..."
-${PODMAN} exec -i "${NAME}" bash -c '
+$${PODMAN} exec -i "$${NAME}" bash -c '
 source /home/oracle/.bashrc
 sqlplus -S sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba << SQL
 WHENEVER SQLERROR CONTINUE
@@ -309,7 +313,7 @@ SQL
 
 # Configure CDB-level settings for vector operations
 echo "[DB] Configuring vector memory settings..."
-${PODMAN} exec -i "${NAME}" bash -c '
+$${PODMAN} exec -i "$${NAME}" bash -c '
 source /home/oracle/.bashrc
 sqlplus -S / as sysdba << SQL
 WHENEVER SQLERROR CONTINUE
