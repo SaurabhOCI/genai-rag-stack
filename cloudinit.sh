@@ -100,7 +100,8 @@ pip install --no-cache-dir \
   python-dotenv \
   oracledb \
   scikit-learn \
-  plotly
+  plotly \
+  sentence-transformers
 
 echo "source ~/.venvs/genai/bin/activate" >> /home/opc/.bashrc
 echo "Python environment ready"
