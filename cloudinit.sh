@@ -470,8 +470,9 @@ WorkingDirectory=/home/opc/code
 ExecStart=/home/opc/start-jupyter.sh
 Restart=on-failure
 RestartSec=10
-StandardOutput=append:/home/opc/jupyter.log
-StandardError=append:/home/opc/jupyter.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jupyter
 
 Environment="PATH=/home/opc/.venvs/genai/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="JUPYTER_CONFIG_DIR=/home/opc/.jupyter"
