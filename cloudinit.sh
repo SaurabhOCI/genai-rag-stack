@@ -238,6 +238,37 @@ JUPYTER_EOF
 chown opc:opc /home/opc/start-jupyter.sh
 chmod +x /home/opc/start-jupyter.sh
 
+# ============ ADD JUPYTER SYSTEMD SERVICE HERE ============
+cat > /home/opc/jupyter.service << 'JUPYTER_SERVICE_EOF'
+[Unit]
+Description=Jupyter Lab Server
+After=network.target genai-setup.service
+Requires=genai-setup.service
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/code
+ExecStart=/home/opc/start-jupyter.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/opc/jupyter.log
+StandardError=append:/home/opc/jupyter.log
+
+Environment="PATH=/home/opc/.venvs/genai/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="JUPYTER_CONFIG_DIR=/home/opc/.jupyter"
+
+[Install]
+WantedBy=multi-user.target
+JUPYTER_SERVICE_EOF
+
+# Install the service file
+cp /home/opc/jupyter.service /etc/systemd/system/jupyter.service
+chown root:root /etc/systemd/system/jupyter.service
+chmod 644 /etc/systemd/system/jupyter.service
+# ============ END JUPYTER SERVICE ADDITION ============
+
 # Open firewall ports
 firewall-cmd --zone=public --add-port=8888/tcp --permanent || true
 firewall-cmd --zone=public --add-port=8501/tcp --permanent || true
@@ -447,8 +478,13 @@ echo "[STEP] Starting services"
 systemctl daemon-reload
 systemctl enable genai-db.service
 systemctl enable genai-setup.service
+systemctl enable jupyter.service
+
 systemctl start genai-db.service
 systemctl start genai-setup.service
+systemctl start jupyter.service
+
+echo "[SUCCESS] All services enabled and started"
 
 # --------------------------------------------------------------------
 # Create bastion helper if enabled
