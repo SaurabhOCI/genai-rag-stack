@@ -234,7 +234,7 @@ EOF
 
 chmod +x /usr/local/bin/genai-setup.sh
 
-# Database setup script
+# Database setup script with IMPROVED FREEPDB1 handling
 cat > /usr/local/bin/genai-db.sh << 'EOF'
 #!/bin/bash
 set -e
@@ -246,30 +246,31 @@ IMAGE="container-registry.oracle.com/database/free:latest"
 NAME="23ai"
 
 # Pull image and start container
-$PODMAN pull "$IMAGE" || exit 1
-$PODMAN rm -f "$NAME" || true
+${PODMAN} pull "${IMAGE}" || exit 1
+${PODMAN} rm -f "${NAME}" || true
 
-$PODMAN run -d --name "$NAME" --network=host \
-  -e ORACLE_PWD="$ORACLE_PWD" \
+${PODMAN} run -d --name "${NAME}" --network=host \
+  -e ORACLE_PWD="${ORACLE_PWD}" \
   -e ORACLE_PDB="FREEPDB1" \
   -e ORACLE_MEMORY='2048' \
   -v /home/opc/oradata:/opt/oracle/oradata:z \
-  "$IMAGE"
+  "${IMAGE}"
 
 echo "[DB] Waiting for database to be ready..."
 for i in {1..120}; do
-  if $PODMAN logs "$NAME" 2>&1 | grep -q 'DATABASE IS READY TO USE!'; then
+  if ${PODMAN} logs "${NAME}" 2>&1 | grep -q 'DATABASE IS READY TO USE!'; then
     echo "[DB] Database ready"
     break
   fi
   sleep 10
 done
 
-# Configure database
+# Configure database with better FREEPDB1 handling
 echo "[DB] Configuring database..."
-$PODMAN exec -i "$NAME" bash -c '
+${PODMAN} exec -i "${NAME}" bash -c '
 source /home/oracle/.bashrc
 sqlplus -S / as sysdba << SQL
+WHENEVER SQLERROR CONTINUE
 ALTER PLUGGABLE DATABASE FREEPDB1 OPEN;
 ALTER PLUGGABLE DATABASE FREEPDB1 SAVE STATE;
 ALTER SYSTEM REGISTER;
@@ -277,44 +278,86 @@ EXIT
 SQL
 ' || true
 
-# Wait for FREEPDB1 service to be registered
+# Improved FREEPDB1 service registration with retry logic
 echo "[DB] Waiting for FREEPDB1 service registration..."
-for i in {1..60}; do
-  if $PODMAN exec "$NAME" bash -c '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
-    echo "[DB] FREEPDB1 service registered"
+service_registered=false
+for attempt in {1..5}; do
+  echo "[DB] Registration attempt $attempt/5..."
+  
+  # Force service registration
+  ${PODMAN} exec -i "${NAME}" bash -c '
+  source /home/oracle/.bashrc
+  sqlplus -S / as sysdba << SQL
+  ALTER SYSTEM REGISTER;
+  EXIT
+SQL
+  ' || true
+  
+  # Wait and check
+  sleep 15
+  
+  if ${PODMAN} exec "${NAME}" bash -c '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
+    echo "[DB] FREEPDB1 service registered successfully"
+    service_registered=true
     break
   fi
-  sleep 5
+  
+  # If not registered, try restarting listener
+  if [ $attempt -lt 5 ]; then
+    echo "[DB] Service not registered, restarting listener..."
+    ${PODMAN} exec "${NAME}" bash -c '. /home/oracle/.bashrc; lsnrctl stop; lsnrctl start' || true
+    sleep 10
+  fi
 done
 
-# Create vector user and configure PDB for GenAI workloads
+if [ "$service_registered" = "false" ]; then
+  echo "[DB] Warning: FREEPDB1 service registration failed after all attempts"
+fi
+
+# Create vector user with enhanced error handling and retry
 echo "[DB] Creating vector user and configuring for GenAI..."
-$PODMAN exec -i "$NAME" bash -c '
-source /home/oracle/.bashrc
-sqlplus -S sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba << SQL
-WHENEVER SQLERROR CONTINUE
+vector_user_created=false
 
--- Create additional tablespaces for GenAI workloads
-CREATE BIGFILE TABLESPACE tbs2 DATAFILE '"'"'bigtbs_f2.dbf'"'"' SIZE 1G AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL SEGMENT SPACE MANAGEMENT AUTO;
-CREATE UNDO TABLESPACE undots2 DATAFILE '"'"'undotbs_2a.dbf'"'"' SIZE 1G AUTOEXTEND ON RETENTION GUARANTEE;
-CREATE TEMPORARY TABLESPACE temp_demo TEMPFILE '"'"'temp02.dbf'"'"' SIZE 1G REUSE AUTOEXTEND ON NEXT 32M MAXSIZE UNLIMITED EXTENT MANAGEMENT LOCAL UNIFORM SIZE 1M;
-
--- Create vector user with proper permissions for AI workloads
-CREATE USER vector IDENTIFIED BY "vector" DEFAULT TABLESPACE tbs2 QUOTA UNLIMITED ON tbs2;
-GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE TO vector;
-GRANT UNLIMITED TABLESPACE TO vector;
-
--- Additional grants for GenAI functionality
-GRANT CREATE ANY DIRECTORY TO vector;
-GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO vector;
-
-EXIT
+for attempt in {1..3}; do
+  echo "[DB] Vector user creation attempt $attempt/3..."
+  
+  if ${PODMAN} exec -i "${NAME}" bash -c '
+  source /home/oracle/.bashrc
+  sqlplus -S sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba << SQL
+  WHENEVER SQLERROR CONTINUE
+  
+  -- Create vector user with proper permissions for AI workloads
+  CREATE USER vector IDENTIFIED BY "vector" DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;
+  GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE TO vector;
+  GRANT UNLIMITED TABLESPACE TO vector;
+  GRANT CREATE ANY DIRECTORY TO vector;
+  GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO vector;
+  
+  -- Test the connection
+  CONNECT vector/vector@127.0.0.1:1521/FREEPDB1;
+  SELECT '"'"'Vector user created successfully'"'"' as status FROM DUAL;
+  
+  EXIT
 SQL
-' || echo "[DB] Warning: Some database configuration steps may have failed"
+  '; then
+    echo "[DB] Vector user created successfully"
+    vector_user_created=true
+    break
+  else
+    echo "[DB] Vector user creation failed, attempt $attempt/3"
+    if [ $attempt -lt 3 ]; then
+      sleep 10
+    fi
+  fi
+done
+
+if [ "$vector_user_created" = "false" ]; then
+  echo "[DB] Warning: Vector user creation failed after all attempts"
+fi
 
 # Configure CDB-level settings for vector operations
 echo "[DB] Configuring vector memory settings..."
-$PODMAN exec -i "$NAME" bash -c '
+${PODMAN} exec -i "${NAME}" bash -c '
 source /home/oracle/.bashrc
 sqlplus -S / as sysdba << SQL
 WHENEVER SQLERROR CONTINUE
@@ -322,9 +365,24 @@ CREATE PFILE FROM SPFILE;
 ALTER SYSTEM SET vector_memory_size = 512M SCOPE=SPFILE;
 SHUTDOWN IMMEDIATE;
 STARTUP;
+
+-- Reopen FREEPDB1 after restart
+ALTER PLUGGABLE DATABASE FREEPDB1 OPEN;
+ALTER PLUGGABLE DATABASE FREEPDB1 SAVE STATE;
+ALTER SYSTEM REGISTER;
+
 EXIT
 SQL
 ' || echo "[DB] Warning: Vector memory configuration may have failed"
+
+# Final verification
+echo "[DB] Final verification..."
+sleep 5
+if ${PODMAN} exec "${NAME}" bash -c '. /home/oracle/.bashrc; echo "SELECT USER FROM DUAL;" | sqlplus -S vector/vector@127.0.0.1:1521/FREEPDB1' 2>/dev/null | grep -q VECTOR; then
+  echo "[DB] ✓ Vector user verified successfully"
+else
+  echo "[DB] ⚠ Vector user verification failed"
+fi
 
 echo "[DB] Database setup complete"
 EOF
