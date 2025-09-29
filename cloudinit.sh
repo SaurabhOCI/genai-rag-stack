@@ -194,7 +194,7 @@ chown -R opc:opc /opt/genai
 # Create Jupyter startup script with robust password handling
 cat > /home/opc/start-jupyter.sh << 'JUPYTER_EOF'
 #!/bin/bash
-source ~/.venvs/genai/bin/activate
+source /home/opc/.venvs/genai/bin/activate
 export JUPYTER_CONFIG_DIR=/home/opc/.jupyter
 mkdir -p $JUPYTER_CONFIG_DIR
 
