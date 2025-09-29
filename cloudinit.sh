@@ -206,10 +206,15 @@ if [ "$JUPYTER_ENABLE_AUTH" = "true" ] && [ -n "$JUPYTER_PASSWORD" ]; then
     echo "Setting up Jupyter with password authentication..."
     python3 -c "
 from jupyter_server.auth import passwd
-with open('/home/opc/.jupyter/jupyter_lab_config.py', 'w') as f:
-    f.write(f\"c.ServerApp.password = '{passwd('$JUPYTER_PASSWORD')}\\n\")
+import os
+
+config_file = '/home/opc/.jupyter/jupyter_lab_config.py'
+password_hash = passwd('$JUPYTER_PASSWORD')
+
+with open(config_file, 'w') as f:
+    f.write(f'c.ServerApp.password = \"{password_hash}\"\\n')
     f.write('c.ServerApp.allow_remote_access = True\\n')
-    f.write('c.ServerApp.ip = \\\"0.0.0.0\\\"\\n')
+    f.write('c.ServerApp.ip = \"0.0.0.0\"\\n')
     f.write('c.ServerApp.port = 8888\\n')
     f.write('c.ServerApp.open_browser = False\\n')
 "
