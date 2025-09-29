@@ -6,6 +6,17 @@ LOGFILE="/var/log/genai_setup.log"
 exec > >(tee -a "$LOGFILE") 2>&1
 echo "===== GenAI OneClick: start $(date -u) ====="
 
+# CRITICAL: Wait for DNS to be ready before attempting package operations
+echo "[WAIT] Waiting for DNS resolution..."
+for i in {1..60}; do
+  if nslookup yum.oracle.com > /dev/null 2>&1; then
+    echo "[SUCCESS] DNS is ready"
+    break
+  fi
+  echo "[WAIT] DNS not ready, attempt $i/60"
+  sleep 5
+done
+
 # Template variables from Terraform
 JUPYTER_ENABLE_AUTH="${jupyter_enable_auth}"
 JUPYTER_PASSWORD="${jupyter_password}"
