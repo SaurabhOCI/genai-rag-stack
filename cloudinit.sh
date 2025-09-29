@@ -194,7 +194,7 @@ chown -R opc:opc /opt/genai
 # Create Jupyter startup script with robust password handling
 cat > /home/opc/start-jupyter.sh << 'JUPYTER_EOF'
 #!/bin/bash
-source /home/opc/.venvs/genai/bin/activate
+source ~/.venvs/genai/bin/activate
 export JUPYTER_CONFIG_DIR=/home/opc/.jupyter
 mkdir -p $JUPYTER_CONFIG_DIR
 
@@ -440,47 +440,6 @@ TimeoutStartSec=1800
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/genai-setup.service << 'EOF'
-[Unit]
-Description=GenAI Setup
-After=network.target genai-db.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/genai-setup.sh
-TimeoutStartSec=1800
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# UPYTER SERVICE HERE - DIRECTLY IN CLOUDINIT.SH
-cat > /etc/systemd/system/jupyter.service << 'EOF'
-[Unit]
-Description=Jupyter Lab Server
-After=network.target genai-setup.service
-Requires=genai-setup.service
-
-[Service]
-Type=simple
-User=opc
-Group=opc
-WorkingDirectory=/home/opc/code
-ExecStart=/home/opc/start-jupyter.sh
-Restart=on-failure
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=jupyter
-
-Environment="PATH=/home/opc/.venvs/genai/bin:/usr/local/bin:/usr/bin:/bin"
-Environment="JUPYTER_CONFIG_DIR=/home/opc/.jupyter"
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
 # --------------------------------------------------------------------
 # Start services
 # --------------------------------------------------------------------
@@ -488,13 +447,8 @@ echo "[STEP] Starting services"
 systemctl daemon-reload
 systemctl enable genai-db.service
 systemctl enable genai-setup.service
-systemctl enable jupyter.service
-
 systemctl start genai-db.service
 systemctl start genai-setup.service
-systemctl start jupyter.service
-
-echo "[SUCCESS] All services enabled and started"
 
 # --------------------------------------------------------------------
 # Create bastion helper if enabled
