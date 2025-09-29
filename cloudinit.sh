@@ -246,19 +246,19 @@ IMAGE="container-registry.oracle.com/database/free:latest"
 NAME="23ai"
 
 # Pull image and start container
-${PODMAN} pull "${IMAGE}" || exit 1
-${PODMAN} rm -f "${NAME}" || true
+$PODMAN pull "$IMAGE" || exit 1
+$PODMAN rm -f "$NAME" || true
 
-${PODMAN} run -d --name "${NAME}" --network=host \
-  -e ORACLE_PWD="${ORACLE_PWD}" \
+$PODMAN run -d --name "$NAME" --network=host \
+  -e ORACLE_PWD="$ORACLE_PWD" \
   -e ORACLE_PDB="FREEPDB1" \
   -e ORACLE_MEMORY='2048' \
   -v /home/opc/oradata:/opt/oracle/oradata:z \
-  "${IMAGE}"
+  "$IMAGE"
 
 echo "[DB] Waiting for database to be ready..."
 for i in {1..120}; do
-  if ${PODMAN} logs "${NAME}" 2>&1 | grep -q 'DATABASE IS READY TO USE!'; then
+  if $PODMAN logs "$NAME" 2>&1 | grep -q 'DATABASE IS READY TO USE!'; then
     echo "[DB] Database ready"
     break
   fi
@@ -267,7 +267,7 @@ done
 
 # Configure database with better FREEPDB1 handling
 echo "[DB] Configuring database..."
-${PODMAN} exec -i "${NAME}" bash -c '
+$PODMAN exec -i "$NAME" bash -c '
 source /home/oracle/.bashrc
 sqlplus -S / as sysdba << SQL
 WHENEVER SQLERROR CONTINUE
@@ -285,7 +285,7 @@ for attempt in {1..5}; do
   echo "[DB] Registration attempt $attempt/5..."
   
   # Force service registration
-  ${PODMAN} exec -i "${NAME}" bash -c '
+  $PODMAN exec -i "$NAME" bash -c '
   source /home/oracle/.bashrc
   sqlplus -S / as sysdba << SQL
   ALTER SYSTEM REGISTER;
@@ -296,7 +296,7 @@ SQL
   # Wait and check
   sleep 15
   
-  if ${PODMAN} exec "${NAME}" bash -c '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
+  if $PODMAN exec "$NAME" bash -c '. /home/oracle/.bashrc; lsnrctl status' | grep -qi 'Service "FREEPDB1"'; then
     echo "[DB] FREEPDB1 service registered successfully"
     service_registered=true
     break
@@ -305,7 +305,7 @@ SQL
   # If not registered, try restarting listener
   if [ $attempt -lt 5 ]; then
     echo "[DB] Service not registered, restarting listener..."
-    ${PODMAN} exec "${NAME}" bash -c '. /home/oracle/.bashrc; lsnrctl stop; lsnrctl start' || true
+    $PODMAN exec "$NAME" bash -c '. /home/oracle/.bashrc; lsnrctl stop; lsnrctl start' || true
     sleep 10
   fi
 done
@@ -321,7 +321,7 @@ vector_user_created=false
 for attempt in {1..3}; do
   echo "[DB] Vector user creation attempt $attempt/3..."
   
-  if ${PODMAN} exec -i "${NAME}" bash -c '
+  if $PODMAN exec -i "$NAME" bash -c '
   source /home/oracle/.bashrc
   sqlplus -S sys/database123@127.0.0.1:1521/FREEPDB1 as sysdba << SQL
   WHENEVER SQLERROR CONTINUE
@@ -357,7 +357,7 @@ fi
 
 # Configure CDB-level settings for vector operations
 echo "[DB] Configuring vector memory settings..."
-${PODMAN} exec -i "${NAME}" bash -c '
+$PODMAN exec -i "$NAME" bash -c '
 source /home/oracle/.bashrc
 sqlplus -S / as sysdba << SQL
 WHENEVER SQLERROR CONTINUE
@@ -378,7 +378,7 @@ SQL
 # Final verification
 echo "[DB] Final verification..."
 sleep 5
-if ${PODMAN} exec "${NAME}" bash -c '. /home/oracle/.bashrc; echo "SELECT USER FROM DUAL;" | sqlplus -S vector/vector@127.0.0.1:1521/FREEPDB1' 2>/dev/null | grep -q VECTOR; then
+if $PODMAN exec "$NAME" bash -c '. /home/oracle/.bashrc; echo "SELECT USER FROM DUAL;" | sqlplus -S vector/vector@127.0.0.1:1521/FREEPDB1' 2>/dev/null | grep -q VECTOR; then
   echo "[DB] ✓ Vector user verified successfully"
 else
   echo "[DB] ⚠ Vector user verification failed"
